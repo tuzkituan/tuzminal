@@ -3258,6 +3258,7 @@ dependencies = [
  "tuz-core",
  "tuz-font",
  "tuz-layout",
+ "tuz-ui",
  "unicode-width",
  "wgpu",
 ]
@@ -3292,6 +3293,7 @@ dependencies = [
  "tuz-plugin",
  "tuz-plugin-api",
  "tuz-render",
+ "tuz-ui",
  "wgpu",
  "winit",
 ]

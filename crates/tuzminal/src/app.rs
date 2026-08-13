@@ -31,10 +31,15 @@ use tuz_core::{
 };
 use tuz_font::FontSystem;
 use tuz_input::{Action, Keymap};
-use tuz_layout::{Branch, CellSize, CloseOutcome, Direction, Layout, LayoutOptions, PaneId, Rect};
+use tuz_layout::{
+    Branch, CellSize, ChromeButton, CloseOutcome, Direction, Layout, LayoutOptions, PaneId, Rect,
+};
 use tuz_plugin::Host as PluginHost;
 use tuz_plugin_api::{Command as PluginCommand, Event as PluginEvent, KeyOutcome};
 use tuz_render::{build_pane, ColorSpace, Instance, PaneGeometry, Renderer};
+use tuz_ui::{UiKey, Widget};
+
+use crate::settings::{PanelOutcome, SettingsPanel};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -99,6 +104,14 @@ pub struct App {
     selecting: Option<PaneId>,
     /// Set while dragging a split divider.
     dragging: Option<Vec<Branch>>,
+    /// The chrome button under the pointer, for hover highlighting.
+    hovered_button: Option<ChromeButton>,
+    /// The tab under the pointer, so only that tab shows a close button.
+    hovered_tab: Option<usize>,
+    /// True when the pointer is over the hovered tab's close button.
+    hovered_close: bool,
+    /// The settings panel, when open. `None` means closed.
+    panel: Option<SettingsPanel>,
 
     /// Cursor blink phase and when it last flipped.
     blink_on: bool,
@@ -210,6 +223,10 @@ impl App {
             mouse: (0.0, 0.0),
             selecting: None,
             dragging: None,
+            hovered_button: None,
+            hovered_tab: None,
+            hovered_close: false,
+            panel: None,
             blink_on: true,
             blink_at: Instant::now(),
             last_input: Instant::now(),
@@ -273,8 +290,27 @@ impl App {
             status_bar_height: self.status_bar_height(),
             tab_width: TAB_WIDTH,
             min_tab_width: MIN_TAB_WIDTH,
+            buttons: self.chrome_buttons(),
             cell: self.cell_size(),
         }
+    }
+
+    /// Buttons for the tab strip, in right-to-left order.
+    ///
+    /// Window controls appear only without decorations: with them on, the compositor
+    /// already draws a set and ours would sit beside a duplicate.
+    fn chrome_buttons(&self) -> Vec<ChromeButton> {
+        let mut buttons = Vec::with_capacity(7);
+        if !self.settings.config().window.decorations {
+            buttons.push(ChromeButton::Close);
+            buttons.push(ChromeButton::Maximize);
+            buttons.push(ChromeButton::Minimize);
+        }
+        buttons.push(ChromeButton::Settings);
+        buttons.push(ChromeButton::SplitDown);
+        buttons.push(ChromeButton::SplitRight);
+        buttons.push(ChromeButton::NewTab);
+        buttons
     }
 
     /// The label for a tab: its explicit title, else the focused pane's program
@@ -437,6 +473,15 @@ impl App {
             })
             .collect();
         let status_items = self.plugins.status_segments();
+        let hovered_button = self.hovered_button;
+        let hovered_tab = self.hovered_tab;
+        let hovered_close = self.hovered_close;
+        // Widgets are built here, before the `&mut` field borrows, because building a
+        // row needs to read the config.
+        let panel_widgets: Option<Vec<Widget>> = self
+            .panel
+            .as_ref()
+            .map(|panel| panel.widgets(self.settings.config()));
         let srgb = self
             .gpu
             .as_ref()
@@ -524,6 +569,10 @@ impl App {
                     title,
                     active: i == active_tab,
                     has_activity: tab_activity.get(i).copied().unwrap_or(false),
+                    // Only the hovered tab offers a close button: a permanent × on
+                    // every tab is noise, and a stray click costs a running shell.
+                    show_close: hovered_tab == Some(i),
+                    close_hovered: hovered_tab == Some(i) && hovered_close,
                 })
                 .collect();
             tuz_render::draw_tab_bar(
@@ -531,7 +580,16 @@ impl App {
                 fonts,
                 frame.tab_bar,
                 &frame.tabs,
+                &frame.tab_close,
                 &labels,
+                theme,
+                colors,
+            );
+            tuz_render::chrome::draw_chrome_buttons(
+                instances,
+                fonts,
+                &frame.actions,
+                hovered_button,
                 theme,
                 colors,
             );
@@ -547,6 +605,24 @@ impl App {
                 })
                 .collect();
             tuz_render::draw_status_bar(instances, fonts, frame.status_bar, &items, theme, colors);
+        }
+        // The panel goes last so it sits over terminal content and chrome alike.
+        if let (Some(widgets), Some(panel)) = (panel_widgets, self.panel.as_mut()) {
+            let (w, h) = SettingsPanel::preferred_size(cell.width, cell.height);
+            let window = Rect::from_size(gpu.size().0, gpu.size().1);
+            let rect = tuz_render::center_panel(window, w, h);
+
+            tuz_render::draw_panel_frame(instances, window, rect, theme, colors);
+            let body = tuz_render::draw_panel_title(
+                instances,
+                fonts,
+                rect,
+                "Tuzminal Settings",
+                theme,
+                colors,
+            );
+            panel.ui.layout(&widgets, body, cell.height);
+            tuz_render::draw_widgets(instances, fonts, &panel.ui, theme, colors);
         }
         let chrome_end = instances.len() as u32;
 
@@ -671,6 +747,15 @@ impl App {
             ReloadConfig => {
                 self.reload_config();
                 self.notify_plugins(PluginEvent::ConfigReload);
+            }
+            OpenSettings => {
+                // Toggles: pressing the binding again closes it, which is what every
+                // other panel-style UI does.
+                if self.panel.is_some() {
+                    self.close_settings();
+                } else {
+                    self.open_settings();
+                }
             }
 
             SplitRight => self.split(Direction::Right),
@@ -906,6 +991,131 @@ impl App {
         }
     }
 
+    /// Open the settings panel, gathering the option lists once.
+    fn open_settings(&mut self) {
+        if self.panel.is_some() {
+            return;
+        }
+        // Enumerating fonts is not free and the list cannot change while the panel is
+        // up, so it is gathered here rather than every frame.
+        let families = self
+            .fonts
+            .as_ref()
+            .map(|f| f.monospace_families())
+            .unwrap_or_default();
+        let themes = crate::settings::theme_names(self.settings.paths());
+
+        self.panel = Some(SettingsPanel::open(
+            self.settings.config(),
+            families,
+            themes,
+        ));
+        self.request_redraw();
+    }
+
+    fn close_settings(&mut self) {
+        // Closing keeps any unsaved changes for the session, matching how the
+        // font-size keybindings already behave.
+        self.panel = None;
+        self.request_redraw();
+    }
+
+    /// Apply a panel action and rebuild whatever the config change requires.
+    fn handle_panel_action(&mut self, action: tuz_ui::UiAction) {
+        let Some(mut panel) = self.panel.take() else {
+            return;
+        };
+
+        let mut next = self.settings.config().clone();
+        let outcome = panel.apply(action, &mut next);
+
+        match outcome {
+            PanelOutcome::Continue => {}
+            PanelOutcome::Changed => {
+                // Routed through `modify` so the same validation and diffing that
+                // guards keybindings and config reloads applies here too.
+                let actions = self.settings.modify(|c| *c = next);
+                self.apply_reload_actions(&actions);
+            }
+            PanelOutcome::Save => match self.settings.save(panel.snapshot()) {
+                Ok(path) => {
+                    log::info!("saved settings to {}", path.display());
+                    let saved = self.settings.config().clone();
+                    panel.mark_saved(&saved);
+                }
+                Err(e) => log::error!("could not save settings: {e}"),
+            },
+            PanelOutcome::Close => {
+                self.panel = None;
+                self.request_redraw();
+                return;
+            }
+        }
+
+        self.panel = Some(panel);
+        self.request_redraw();
+    }
+
+    /// Rebuild whatever a config change requires.
+    ///
+    /// Extracted from `reload_config` so a panel edit and a file edit take exactly the
+    /// same path — otherwise the two drift and one of them forgets to resize PTYs.
+    fn apply_reload_actions(&mut self, actions: &tuz_config::ReloadActions) {
+        if actions.rebind_keys {
+            self.keymap = build_keymap(&self.settings, &self.plugins);
+        }
+        if actions.rebuild_fonts {
+            self.rebuild_fonts();
+        }
+        if actions.resize_scrollback {
+            let lines = self.settings.config().scrollback.lines;
+            for session in self.sessions.values() {
+                session.set_scrollback(lines);
+            }
+        }
+        if actions.reconfigure_surface {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.reconfigure(self.settings.config());
+            }
+        }
+        if let Some(w) = &self.window {
+            let cfg = self.settings.config();
+            if !cfg.window.dynamic_title {
+                w.set_title(&cfg.window.title);
+            }
+            w.set_decorations(cfg.window.decorations);
+        }
+        // Always relayout: the tab strip and status bar heights depend on config, so
+        // a change with no `relayout` flag can still move every pane.
+        self.relayout();
+        for field in &actions.restart_required {
+            log::warn!("`{field}` only takes effect after a restart");
+        }
+    }
+
+    /// Act on a tab strip button.
+    fn press_chrome_button(&mut self, button: ChromeButton) {
+        match button {
+            ChromeButton::NewTab => {
+                self.dispatch(Action::NewTab);
+            }
+            ChromeButton::Settings => self.open_settings(),
+            ChromeButton::SplitRight => self.split(Direction::Right),
+            ChromeButton::SplitDown => self.split(Direction::Down),
+            ChromeButton::Minimize => {
+                if let Some(w) = &self.window {
+                    w.set_minimized(true);
+                }
+            }
+            ChromeButton::Maximize => {
+                if let Some(w) = &self.window {
+                    w.set_maximized(!w.is_maximized());
+                }
+            }
+            ChromeButton::Close => self.exit_requested = true,
+        }
+    }
+
     fn split(&mut self, dir: Direction) {
         if let Some(pane) = self.layout.split(dir) {
             // Layout first so the new session is spawned with the right grid, then
@@ -1041,6 +1251,29 @@ impl App {
             return;
         };
 
+        // While the panel is open it owns the keyboard. The binding that opened it
+        // still works, so the same chord toggles it shut.
+        if self.panel.is_some() {
+            if self.keymap.lookup(&chord) == Some(&Action::OpenSettings) {
+                self.close_settings();
+                return;
+            }
+            if let Some(key) = panel_key(&chord) {
+                let response = match self.panel.as_mut() {
+                    Some(panel) => panel.ui.key(key),
+                    None => return,
+                };
+                match response {
+                    tuz_ui::KeyResponse::Close => self.close_settings(),
+                    tuz_ui::KeyResponse::Action(action) => self.handle_panel_action(action),
+                    tuz_ui::KeyResponse::Consumed => self.request_redraw(),
+                }
+            }
+            // Anything else is swallowed rather than reaching the shell, so typing at
+            // a settings panel cannot run commands behind it.
+            return;
+        }
+
         // Plugins get first refusal on real key presses, so a plugin can implement
         // its own modal input. Auto-repeat is excluded: a held key must not run a
         // plugin handler dozens of times a second.
@@ -1120,7 +1353,61 @@ impl App {
             self.dragging = None;
         }
 
+        // The panel is modal: a click inside it goes to a widget, and a click outside
+        // it dismisses, which is what every overlay does.
+        if self.panel.is_some() {
+            if !pressed {
+                return;
+            }
+            let inside = self
+                .panel
+                .as_ref()
+                .map(|p| {
+                    p.ui.hit(x, y).is_some() || p.ui.placed().iter().any(|w| w.rect.contains(x, y))
+                })
+                .unwrap_or(false);
+
+            if inside {
+                if let Some(action) = self.panel.as_mut().and_then(|p| p.ui.click(x, y)) {
+                    self.handle_panel_action(action);
+                } else {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
         if pressed {
+            // Buttons come before tabs: a close button sits inside its tab, so
+            // checking the tab first would swallow the click.
+            if let Some(button) = frame.action_at(x, y) {
+                log::debug!("chrome button: {}", button.describe());
+                self.press_chrome_button(button);
+                if self.exit_requested {
+                    return;
+                }
+                self.request_redraw();
+                return;
+            }
+            // Only the hovered tab shows a close button, so only it can be clicked.
+            if let Some(index) = frame.tab_close_at(x, y) {
+                if self.hovered_tab == Some(index) {
+                    if let Some(panes) = self.layout.close_tab(index) {
+                        for pane in panes {
+                            self.drop_session(pane);
+                        }
+                    }
+                    if self.layout.is_empty() {
+                        self.exit_requested = true;
+                        return;
+                    }
+                    self.hovered_tab = None;
+                    self.relayout();
+                    self.request_redraw();
+                    return;
+                }
+            }
+
             // A click on the tab strip selects that tab and goes no further; letting
             // it fall through would also start a selection in the pane below.
             if let Some(index) = frame.tab_at(x, y) {
@@ -1210,6 +1497,13 @@ impl App {
     fn on_mouse_move(&mut self, x: f64, y: f64) {
         self.mouse = (x, y);
 
+        // Hover state changes what is drawn, so it must request a redraw — but only
+        // when it actually changes, or the window repaints continuously while the
+        // pointer moves.
+        if self.update_hover(x as i32, y as i32) {
+            self.request_redraw();
+        }
+
         if let Some(path) = self.dragging.clone() {
             self.drag_divider(&path, x, y);
             return;
@@ -1234,6 +1528,33 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+
+    /// Recompute what the pointer is over, reporting whether anything changed.
+    fn update_hover(&mut self, x: i32, y: i32) -> bool {
+        if let Some(panel) = self.panel.as_mut() {
+            // Chrome hover is meaningless while the panel covers it.
+            let mut changed = panel.ui.set_pointer(x, y);
+            changed |= self.hovered_button.take().is_some();
+            changed |= self.hovered_tab.take().is_some();
+            return changed;
+        }
+
+        let Some(frame) = self.frame.as_ref() else {
+            return false;
+        };
+
+        let button = frame.action_at(x, y);
+        let tab = frame.tab_at(x, y);
+        let close = frame.tab_close_at(x, y).is_some();
+
+        let changed =
+            button != self.hovered_button || tab != self.hovered_tab || close != self.hovered_close;
+
+        self.hovered_button = button;
+        self.hovered_tab = tab;
+        self.hovered_close = close;
+        changed
     }
 
     /// Move a split divider to follow the pointer.
@@ -1475,6 +1796,26 @@ impl App {
         }
         Some(self.blink_at + interval)
     }
+}
+
+/// Translate a chord into a panel key, if the panel understands it.
+///
+/// Only these reach the UI; everything else is swallowed while the panel is open so
+/// stray typing cannot leak into the shell behind it.
+fn panel_key(chord: &tuz_input::KeyChord) -> Option<UiKey> {
+    use tuz_input::{Key, NamedKey};
+
+    Some(match chord.key {
+        Key::Named(NamedKey::Escape) => UiKey::Escape,
+        Key::Named(NamedKey::Tab) if chord.mods.shift() => UiKey::ShiftTab,
+        Key::Named(NamedKey::Tab) => UiKey::Tab,
+        Key::Named(NamedKey::Up) => UiKey::Up,
+        Key::Named(NamedKey::Down) => UiKey::Down,
+        Key::Named(NamedKey::Left) => UiKey::Left,
+        Key::Named(NamedKey::Right) => UiKey::Right,
+        Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => UiKey::Activate,
+        _ => return None,
+    })
 }
 
 /// Translate a plugin direction into the layout's own.

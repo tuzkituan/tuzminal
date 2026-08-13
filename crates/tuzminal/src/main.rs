@@ -4,6 +4,7 @@ mod app;
 mod gpu;
 mod keys;
 mod pkg;
+mod settings;
 
 use anyhow::{Context, Result};
 use clap::Parser;

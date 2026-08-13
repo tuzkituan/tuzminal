@@ -283,6 +283,28 @@ impl FontSystem {
         self.size_px
     }
 
+    /// Installed families that look monospaced, sorted and deduplicated.
+    ///
+    /// For the settings font picker. Filtered by the face's own `is_monospace` flag
+    /// where available and by name otherwise, because a picker listing every
+    /// proportional font on the system would be useless for a terminal.
+    pub fn monospace_families(&self) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+
+        for info in self.db.faces() {
+            let Some((family, _)) = info.families.first() else {
+                continue;
+            };
+            // The flag is authoritative when a font sets it; the name check catches
+            // the ones that do not.
+            let looks_mono = info.monospaced || family.to_lowercase().contains("mono");
+            if looks_mono {
+                names.insert(family.clone());
+            }
+        }
+        names.into_iter().collect()
+    }
+
     fn face(&self, id: FontId) -> &Face {
         &self.faces[id.0 as usize]
     }

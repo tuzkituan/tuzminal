@@ -13,6 +13,7 @@ tuz-config.workspace = true
 tuz-core.workspace = true
 tuz-font.workspace = true
 tuz-layout.workspace = true
+tuz-ui.workspace = true
 
 wgpu.workspace = true
 bytemuck.workspace = true

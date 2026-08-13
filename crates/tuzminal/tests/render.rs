@@ -554,6 +554,7 @@ fn two_split_panes_render_side_by_side_with_a_divider() {
         status_bar_height: 0,
         tab_width: 180,
         min_tab_width: 60,
+        buttons: Vec::new(),
         cell: tuz_layout::CellSize {
             width: metrics.width,
             height: metrics.height,
@@ -743,11 +744,15 @@ fn the_tab_bar_draws_a_strip_with_a_distinguished_active_tab() {
             title: "one",
             active: true,
             has_activity: false,
+            show_close: false,
+            close_hovered: false,
         },
         tuz_render::TabLabel {
             title: "two",
             active: false,
             has_activity: true,
+            show_close: false,
+            close_hovered: false,
         },
     ];
 
@@ -761,6 +766,7 @@ fn the_tab_bar_draws_a_strip_with_a_distinguished_active_tab() {
         &mut fonts,
         bar,
         &tabs,
+        &[],
         &labels,
         &theme,
         colors,
@@ -859,4 +865,111 @@ fn the_status_bar_draws_plugin_segments_with_their_own_colors() {
         found_green,
         "the plugin's segment background should be visible in the right half"
     );
+}
+
+#[test]
+fn the_settings_panel_draws_over_a_dimmed_terminal() {
+    // The chrome tests cover the strip; this covers the panel. What it catches is a
+    // panel that computes correct widget rects and then draws nothing, or draws
+    // outside itself over the terminal.
+    let Some(h) = Harness::new() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let theme = Theme::builtin_default();
+    let mut fonts = fonts();
+    let mut renderer = Renderer::new(&h.device, FORMAT, fonts.atlas());
+    let metrics = fonts.metrics();
+
+    let window = tuz_layout::Rect::from_size(WIDTH, HEIGHT);
+    let panel = tuz_render::center_panel(window, WIDTH * 3 / 4, HEIGHT * 3 / 4);
+
+    let widgets = vec![
+        tuz_ui::Widget::heading("Appearance"),
+        tuz_ui::Widget::toggle(tuz_ui::WidgetId(1), "Ligatures", true),
+        tuz_ui::Widget::button(tuz_ui::WidgetId(2), "Save"),
+    ];
+    let mut ui = tuz_ui::Ui::new();
+    ui.focus(tuz_ui::WidgetId(1));
+
+    let colors = ColorSpace {
+        srgb: false,
+        opacity: 1.0,
+    };
+
+    // Terminal content underneath, so the dim layer has something to dim.
+    let mut instances = vec![Instance::solid(
+        0.0,
+        0.0,
+        WIDTH as f32,
+        HEIGHT as f32,
+        colors.convert(Rgba::rgb(0, 200, 0)),
+    )];
+
+    tuz_render::draw_panel_frame(&mut instances, window, panel, &theme, colors);
+    let body = tuz_render::draw_panel_title(
+        &mut instances,
+        &mut fonts,
+        panel,
+        "Tuzminal Settings",
+        &theme,
+        colors,
+    );
+    ui.layout(&widgets, body, metrics.height);
+    ui.focus(tuz_ui::WidgetId(1));
+    tuz_render::draw_widgets(&mut instances, &mut fonts, &ui, &theme, colors);
+
+    renderer.upload_atlas(&h.device, &h.queue, fonts.atlas_mut());
+    let pixels = h.render(&mut renderer, &instances, Rgba::BLACK);
+
+    // Outside the panel, the green terminal content is dimmed but still green.
+    let outside = pixel(&pixels, 2, HEIGHT / 2);
+    assert!(
+        outside[1] > outside[0] && outside[1] > outside[2],
+        "outside the panel should still be green-dominant, got {outside:?}"
+    );
+    assert!(
+        outside[1] < 200,
+        "and dimmed rather than full brightness, got {}",
+        outside[1]
+    );
+
+    // Inside the panel, the terminal behind is fully covered. Asserting "not green"
+    // rather than an exact color, because any given pixel may land on a widget
+    // background, a button border or the focus ring — the property that matters is
+    // that the panel is opaque over the terminal.
+    let inside = pixel(&pixels, panel.center_x() as u32, panel.center_y() as u32);
+    assert!(
+        !(inside[1] > inside[0] + 20 && inside[1] > inside[2] + 20),
+        "the panel should hide the green terminal behind it, got {inside:?}"
+    );
+    // And it is dark, i.e. theme-derived rather than the bright content below.
+    assert!(
+        inside[1] < 120,
+        "the panel interior should be dark, got {inside:?}"
+    );
+
+    // The focus ring is drawn in the cursor color somewhere inside the panel.
+    let cursor = theme.cursor();
+    let mut found_ring = false;
+    for y in panel.y..panel.bottom() {
+        for x in panel.x..panel.right() {
+            let p = pixel(&pixels, x as u32, y as u32);
+            let d = (p[0] as i32 - cursor.r as i32).abs()
+                + (p[1] as i32 - cursor.g as i32).abs()
+                + (p[2] as i32 - cursor.b as i32).abs();
+            if d < 20 {
+                found_ring = true;
+                break;
+            }
+        }
+        if found_ring {
+            break;
+        }
+    }
+    assert!(found_ring, "the focused row should have a visible ring");
+
+    // And widget text was rasterized.
+    let lit = non_background(&pixels, theme.background);
+    assert!(lit > 100, "expected panel text, only {lit} lit pixels");
 }

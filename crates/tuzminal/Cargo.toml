@@ -18,6 +18,7 @@ tuz-layout.workspace = true
 tuz-plugin.workspace = true
 tuz-plugin-api.workspace = true
 tuz-render.workspace = true
+tuz-ui.workspace = true
 
 alacritty_terminal.workspace = true
 arboard.workspace = true

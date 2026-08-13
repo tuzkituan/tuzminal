@@ -68,6 +68,8 @@ pub struct LayoutOptions {
     /// Floor on tab width. Below this a tab cannot show anything useful, so the
     /// strip starts scrolling instead of shrinking further.
     pub min_tab_width: u32,
+    /// Action buttons to place in the strip, in right-to-left order.
+    pub buttons: Vec<ChromeButton>,
     pub cell: CellSize,
 }
 
@@ -82,6 +84,7 @@ impl Default for LayoutOptions {
             status_bar_height: 0,
             tab_width: 180,
             min_tab_width: 60,
+            buttons: Vec::new(),
             cell: CellSize::default(),
         }
     }
@@ -112,6 +115,53 @@ pub struct Frame {
     pub status_bar: Rect,
     /// One rect per tab, in tab order. Empty when the bar is hidden.
     pub tabs: Vec<Rect>,
+    /// Close button per tab, inside its right edge. Same length as `tabs`.
+    pub tab_close: Vec<Rect>,
+    /// Action buttons packed against the right of the strip.
+    pub actions: Vec<(ChromeButton, Rect)>,
+}
+
+/// A clickable button in the tab strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeButton {
+    NewTab,
+    Settings,
+    SplitRight,
+    SplitDown,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl ChromeButton {
+    /// The glyph drawn on the button.
+    ///
+    /// Single characters from ranges an ordinary font covers, so they render without
+    /// depending on a Nerd Font being installed.
+    pub fn glyph(self) -> char {
+        match self {
+            ChromeButton::NewTab => '+',
+            ChromeButton::Settings => '⚙',
+            ChromeButton::SplitRight => '▥',
+            ChromeButton::SplitDown => '▤',
+            ChromeButton::Minimize => '—',
+            ChromeButton::Maximize => '□',
+            ChromeButton::Close => '⨯',
+        }
+    }
+
+    /// Tooltip-style description, used in logs and available for a future tooltip.
+    pub fn describe(self) -> &'static str {
+        match self {
+            ChromeButton::NewTab => "New tab",
+            ChromeButton::Settings => "Settings",
+            ChromeButton::SplitRight => "Split right",
+            ChromeButton::SplitDown => "Split down",
+            ChromeButton::Minimize => "Minimize",
+            ChromeButton::Maximize => "Maximize",
+            ChromeButton::Close => "Close window",
+        }
+    }
 }
 
 impl Frame {
@@ -163,6 +213,28 @@ impl Frame {
             return None;
         }
         self.tabs.iter().position(|r| r.contains(x, y))
+    }
+
+    /// The tab whose close button is under a point.
+    ///
+    /// Checked before [`tab_at`](Self::tab_at) by callers, since a close button sits
+    /// inside its tab and both would otherwise match.
+    pub fn tab_close_at(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.tab_bar.contains(x, y) {
+            return None;
+        }
+        self.tab_close.iter().position(|r| r.contains(x, y))
+    }
+
+    /// The action button under a point.
+    pub fn action_at(&self, x: i32, y: i32) -> Option<ChromeButton> {
+        if !self.tab_bar.contains(x, y) {
+            return None;
+        }
+        self.actions
+            .iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(button, _)| *button)
     }
 
     /// True when the point is on chrome rather than on a pane.
@@ -478,11 +550,27 @@ impl Layout {
                 .saturating_sub(status_bar.height),
         );
 
+        // Action buttons are square, sized from the strip height, and packed from the
+        // right. Tabs then divide whatever is left, so a tab can never sit underneath
+        // a button.
+        let (actions, tab_area) = if tab_bar.height > 0 {
+            action_rects(tab_bar, &opts.buttons)
+        } else {
+            (Vec::new(), tab_bar)
+        };
+
         let tabs = if tab_bar.height > 0 {
-            tab_rects(tab_bar, self.tabs.len(), opts.tab_width, opts.min_tab_width)
+            tab_rects(
+                tab_area,
+                self.tabs.len(),
+                opts.tab_width,
+                opts.min_tab_width,
+            )
         } else {
             Vec::new()
         };
+
+        let tab_close = tabs.iter().map(|tab| close_rect(*tab)).collect();
 
         let (pane_rects, dividers) = self.active_tab().root.layout(body, opts.divider_width);
         let panes = pane_rects
@@ -496,8 +584,49 @@ impl Layout {
             tab_bar,
             status_bar,
             tabs,
+            tab_close,
+            actions,
         }
     }
+}
+
+/// Lay out action buttons from the right, returning them and the space left for tabs.
+///
+/// Buttons are square and sized from the strip height so they scale with the font
+/// rather than being fixed pixels. If the strip is too narrow to hold them all, the
+/// ones that do not fit are dropped rather than overlapping the tabs — a button drawn
+/// on top of a tab would steal its clicks.
+pub fn action_rects(bar: Rect, buttons: &[ChromeButton]) -> (Vec<(ChromeButton, Rect)>, Rect) {
+    let size = bar.height;
+    if size == 0 || buttons.is_empty() {
+        return (Vec::new(), bar);
+    }
+
+    let mut placed = Vec::with_capacity(buttons.len());
+    let mut right = bar.right();
+
+    for button in buttons {
+        let left = right - size as i32;
+        // Leave at least one button's worth of room for tabs.
+        if left < bar.x + size as i32 {
+            break;
+        }
+        placed.push((*button, Rect::new(left, bar.y, size, size.min(bar.height))));
+        right = left;
+    }
+
+    let consumed = (bar.right() - right).max(0) as u32;
+    let tab_area = Rect::new(bar.x, bar.y, bar.width.saturating_sub(consumed), bar.height);
+    (placed, tab_area)
+}
+
+/// The close button inside a tab, against its right edge.
+fn close_rect(tab: Rect) -> Rect {
+    // A square inset from the edge, and never more than a third of the tab: on a
+    // narrow tab a full-height button would leave no room for the title.
+    let size = (tab.height * 2 / 3).max(1).min(tab.width / 3);
+    let inset = ((tab.height.saturating_sub(size)) / 2) as i32;
+    Rect::new(tab.right() - size as i32 - inset, tab.y + inset, size, size)
 }
 
 /// Divide the tab strip into per-tab rects.
@@ -576,6 +705,7 @@ mod tests {
             status_bar_height: 0,
             tab_width: 180,
             min_tab_width: 60,
+            buttons: Vec::new(),
             cell: CellSize {
                 width: 8,
                 height: 16,
@@ -996,6 +1126,7 @@ mod chrome_tests {
             status_bar_height: 20,
             tab_width: 180,
             min_tab_width: 60,
+            buttons: Vec::new(),
             cell: CellSize {
                 width: 8,
                 height: 16,

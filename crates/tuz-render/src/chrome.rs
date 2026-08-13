@@ -15,7 +15,7 @@ use crate::instance::{ColorSpace, Instance};
 use crate::text::{self, Align};
 use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
-use tuz_layout::Rect;
+use tuz_layout::{ChromeButton, Rect};
 
 /// Inset for text inside a tab or status segment.
 const PADDING: f32 = 8.0;
@@ -29,17 +29,24 @@ pub struct TabLabel<'a> {
     pub active: bool,
     /// Shown as a dot before the title when the tab has unseen output.
     pub has_activity: bool,
+    /// Draw the close button. Only the hovered tab gets one: a permanent × on every
+    /// tab is visual noise, and an accidental click costs a running shell.
+    pub show_close: bool,
+    /// The close button itself is hovered, so highlight it.
+    pub close_hovered: bool,
 }
 
 /// Draw the tab bar.
 ///
 /// Returns nothing: the caller already knows the rect, and the instance range it
 /// appended is whatever the buffer grew by.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_tab_bar(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
     bar: Rect,
     tabs: &[Rect],
+    closes: &[Rect],
     labels: &[TabLabel<'_>],
     theme: &Theme,
     colors: ColorSpace,
@@ -123,6 +130,25 @@ pub fn draw_tab_bar(
             text_rect.width = text_rect.width.saturating_sub(shift);
         }
 
+        // A close button eats space on the right, so the title has to give some back
+        // or a long title would run underneath it.
+        let index = tabs.iter().position(|t| t == rect).unwrap_or(0);
+        if label.show_close {
+            if let Some(close) = closes.get(index) {
+                if label.close_hovered {
+                    out.push(Instance::solid(
+                        close.x as f32,
+                        close.y as f32,
+                        close.width as f32,
+                        close.height as f32,
+                        colors.convert_opaque(theme.normal.red),
+                    ));
+                }
+                let shrink = (rect.right() - close.x).max(0) as u32;
+                text_rect.width = text_rect.width.saturating_sub(shrink);
+            }
+        }
+
         text::draw_in_box(
             out,
             fonts,
@@ -137,6 +163,71 @@ pub fn draw_tab_bar(
             } else {
                 Style::Regular
             },
+        );
+
+        if label.show_close {
+            if let Some(close) = closes.get(index) {
+                text::draw_in_box(
+                    out,
+                    fonts,
+                    "⨯",
+                    *close,
+                    0.0,
+                    Align::Center,
+                    if label.close_hovered {
+                        theme.background
+                    } else {
+                        theme.bright.black
+                    },
+                    colors,
+                    Style::Regular,
+                );
+            }
+        }
+    }
+}
+
+/// Draw the action buttons packed at the right of the tab strip.
+pub fn draw_chrome_buttons(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    buttons: &[(ChromeButton, Rect)],
+    hovered: Option<ChromeButton>,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    for (button, rect) in buttons {
+        let is_hovered = hovered == Some(*button);
+        if is_hovered {
+            // Close gets a red hover, because it is the one that loses work.
+            let fill = if *button == ChromeButton::Close {
+                theme.normal.red
+            } else {
+                theme.background_focused()
+            };
+            out.push(Instance::solid(
+                rect.x as f32,
+                rect.y as f32,
+                rect.width as f32,
+                rect.height as f32,
+                colors.convert_opaque(fill),
+            ));
+        }
+
+        text::draw_in_box(
+            out,
+            fonts,
+            &button.glyph().to_string(),
+            *rect,
+            0.0,
+            Align::Center,
+            if is_hovered {
+                theme.foreground
+            } else {
+                theme.bright.black
+            },
+            colors,
+            Style::Regular,
         );
     }
 }
@@ -260,6 +351,8 @@ mod tests {
                 title: "shell",
                 active: i == active,
                 has_activity: false,
+                show_close: false,
+                close_hovered: false,
             })
             .collect()
     }
@@ -273,6 +366,7 @@ mod tests {
             &mut fonts,
             Rect::new(0, 0, 600, 0),
             &[Rect::new(0, 0, 180, 0)],
+            &[],
             &labels(0, 1),
             &Theme::builtin_default(),
             colors(),
@@ -288,6 +382,7 @@ mod tests {
             &mut out,
             &mut fonts,
             bar(),
+            &[],
             &[],
             &[],
             &Theme::builtin_default(),
@@ -310,6 +405,7 @@ mod tests {
             &mut fonts,
             bar(),
             &tabs,
+            &[],
             &labels(0, 2),
             &Theme::builtin_default(),
             colors(),
@@ -332,6 +428,7 @@ mod tests {
             &mut fonts,
             bar(),
             &tabs,
+            &[],
             &labels(0, 2),
             &theme,
             colors(),
@@ -366,6 +463,7 @@ mod tests {
             &mut fonts,
             bar(),
             &tabs,
+            &[],
             &labels(2, 4),
             &theme,
             colors(),
@@ -390,6 +488,7 @@ mod tests {
             &mut fonts,
             bar(),
             &tabs,
+            &[],
             &labels(0, 2),
             &Theme::builtin_default(),
             colors(),
@@ -416,6 +515,7 @@ mod tests {
                 &mut fonts,
                 bar(),
                 &tabs,
+                &[],
                 &labels(0, 1),
                 &theme,
                 colors(),
@@ -432,12 +532,15 @@ mod tests {
                 title: "shell",
                 active: true,
                 has_activity: true,
+                show_close: false,
+                close_hovered: false,
             }];
             draw_tab_bar(
                 &mut out,
                 &mut fonts,
                 bar(),
                 &tabs,
+                &[],
                 &marked,
                 &theme,
                 colors(),
@@ -464,6 +567,8 @@ mod tests {
             title: "an extremely long tab title that cannot possibly fit",
             active: true,
             has_activity: false,
+            show_close: false,
+            close_hovered: false,
         }];
 
         let mut out = Vec::new();
@@ -472,6 +577,7 @@ mod tests {
             &mut fonts,
             bar(),
             &tabs[..1],
+            &[],
             &long,
             &Theme::builtin_default(),
             colors(),

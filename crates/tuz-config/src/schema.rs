@@ -78,6 +78,7 @@ pub const DEFAULT_KEYS: &[(&str, &str)] = &[
     ("ctrl+shift+minus", "decrease_font_size"),
     ("ctrl+shift+0", "reset_font_size"),
     ("ctrl+shift+r", "reload_config"),
+    ("ctrl+shift+comma", "open_settings"),
     ("shift+pageup", "scroll_page_up"),
     ("shift+pagedown", "scroll_page_down"),
 ];
@@ -125,6 +126,7 @@ fn default_keys() -> BTreeMap<String, String> {
         ("ctrl+shift+minus", "decrease_font_size"),
         ("ctrl+shift+0", "reset_font_size"),
         ("ctrl+shift+r", "reload_config"),
+        ("ctrl+shift+comma", "open_settings"),
         ("shift+pageup", "scroll_page_up"),
         ("shift+pagedown", "scroll_page_down"),
     ]

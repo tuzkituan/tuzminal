@@ -8,7 +8,7 @@ abstracted so macOS and Windows are a port rather than a rewrite.
 
 > **Status: M1–M5 complete.** It runs shells, renders text, splits, tabs with a
 > drawn tab bar, themes, a plugin status bar, and loads Lua and WASM plugins.
-> 463 tests pass, including GPU tests that read pixels back. macOS and Windows
+> 556 tests pass, including GPU tests that read pixels back. macOS and Windows
 > are untested. See [Status](#status) for the honest detail.
 
 ## Build and run
@@ -72,6 +72,23 @@ always_show_tab_bar = false   # the bar hides itself with a single tab
 
 Keybindings **layer over the defaults** rather than replacing them, so adding one
 chord does not cost you the other twenty-two. Bind to `"none"` to remove one.
+
+## Buttons and settings
+
+The tab strip carries a `+` for a new tab, split buttons, a `⚙` for settings, and a
+`×` on the hovered tab only — a permanent close button on every tab is noise, and a
+stray click costs a running shell. Window controls appear only with
+`decorations = false`, since otherwise the compositor already draws a set.
+
+`⚙` or `ctrl+shift+,` opens a settings panel over the terminal. Edits apply **live**,
+because seeing the effect while choosing is the whole advantage over editing TOML, so
+the three exits differ: **Save** writes to `config.toml`, **Revert** restores the
+config as it was when the panel opened, and **Escape** closes while keeping unsaved
+changes for the session. Tab/arrows move a visible focus ring; Enter activates.
+
+Saving preserves your file. Only the keys you changed are rewritten, via `toml_edit`,
+so comments and formatting survive — a plain serialize would produce a valid file and
+delete every comment in it.
 
 ## Packages
 
@@ -169,15 +186,16 @@ nothing.
 
 | Crate | Responsibility | Tests |
 |---|---|---|
-| `tuz-config` | TOML schema, themes, live reload, reload diffing | 57 |
+| `tuz-config` | TOML schema, themes, live reload, diffing, saving | 71 |
 | `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 78 |
 | `tuz-font` | Discovery, system-wide fallback, shaping, glyph atlas | 42 |
 | `tuz-input` | Keychord grammar, actions, keymap | 39 |
 | `tuz-layout` | BSP split tree, tabs, chrome strips, geometric focus | 73 |
 | `tuz-plugin` | Host, Lua runtime, WASM runtime | 57 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
-| `tuz-render` | Instanced wgpu renderer, text layout, tab/status bars | 48 |
-| `tuzminal` | Application, GPU surface, CLI, package manager | 55 |
+| `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 67 |
+| `tuz-ui` | Widget model, focus order, hit-testing | 42 |
+| `tuzminal` | Application, GPU surface, CLI, packages, settings panel | 87 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
 implementation *and* a cross-platform PTY (openpty on unix, ConPTY on Windows)
@@ -194,14 +212,15 @@ by plugins; mouse selection and clipboard; scrollback; SGR mouse reporting;
 bracketed paste; live config reload; Lua and WASM plugins; the package manager CLI.
 
 **Not done:** subpixel antialiasing; IME for CJK input; `select_all`; plugin
-config overlays; tab reordering and a close button on tabs. macOS and Windows
+config overlays; tab reordering; a text-input widget (the font picker is a dropdown
+over installed monospace families instead). macOS and Windows
 compile-target support is in place via the abstractions but **has never been built
 or run** — treat it as unverified.
 
 ## Development
 
 ```bash
-cargo test --workspace --features tuz-core/test-util   # 463 tests
+cargo test --workspace --features tuz-core/test-util   # 556 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
 ```

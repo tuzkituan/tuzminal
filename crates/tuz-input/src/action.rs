@@ -57,6 +57,7 @@ pub enum Action {
 
     // --- application ---
     ReloadConfig,
+    OpenSettings,
     Quit,
 
     /// Send a literal byte string to the focused pane. Not nameable in config's
@@ -106,6 +107,7 @@ const NAMED_ACTIONS: &[(&str, Action)] = &[
     ("scroll_to_bottom", Action::ScrollToBottom),
     ("clear_scrollback", Action::ClearScrollback),
     ("reload_config", Action::ReloadConfig),
+    ("open_settings", Action::OpenSettings),
     ("quit", Action::Quit),
 ];
 
