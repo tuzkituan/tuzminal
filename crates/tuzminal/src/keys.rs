@@ -105,6 +105,35 @@ pub fn chord_from(logical: &WKey, mods: ModifiersState) -> Option<KeyChord> {
     Some(KeyChord::new(modifiers_from(mods), key).normalized())
 }
 
+/// Decide what bytes a key press should send to the PTY.
+///
+/// Split out from the event handler so the rule can be tested directly: this is
+/// where "I cannot type capital letters" lived. The chord used for *keymap lookup*
+/// is normalized — `D` becomes `shift` plus `d` so `ctrl+shift+d` can be matched —
+/// and encoding from that normalized chord silently lowercased every character the
+/// user typed.
+///
+/// The rule:
+///
+/// - No ctrl/alt/super: use the platform's composed `text`, which already accounts
+///   for keyboard layout and dead keys (`´` then `e` gives `é`). Control characters
+///   are excluded so Enter and Tab still get their proper escape sequences.
+/// - Otherwise: encode from the **raw** logical key, never the normalized one.
+pub fn bytes_for_key(
+    logical: &WKey,
+    text: Option<&str>,
+    mods: Modifiers,
+    mode: tuz_core::TermMode,
+) -> Option<Vec<u8>> {
+    if !mods.ctrl() && !mods.alt() && !mods.super_key() {
+        if let Some(text) = text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
+            return Some(text.as_bytes().to_vec());
+        }
+    }
+    let key = key_from(logical)?;
+    tuz_core::encode(key, mods, mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +210,149 @@ mod tests {
     #[test]
     fn unmapped_keys_produce_no_chord() {
         assert_eq!(chord_from(&WKey::Dead(None), ModifiersState::empty()), None);
+    }
+}
+
+#[cfg(test)]
+mod pty_bytes_tests {
+    use super::*;
+    use tuz_core::TermMode;
+
+    fn character(s: &str) -> WKey {
+        WKey::Character(s.into())
+    }
+
+    fn bytes(logical: &WKey, text: Option<&str>, mods: Modifiers) -> Option<Vec<u8>> {
+        bytes_for_key(logical, text, mods, TermMode::empty())
+    }
+
+    #[test]
+    fn a_capital_letter_reaches_the_pty_as_a_capital() {
+        // The reported bug: uppercase was impossible to type. Shift+D arrives as
+        // logical key `D` with text `"D"`, and must send `D`.
+        let out = bytes(&character("D"), Some("D"), Modifiers::SHIFT).unwrap();
+        assert_eq!(out, b"D");
+    }
+
+    #[test]
+    fn every_capital_letter_survives() {
+        for c in 'A'..='Z' {
+            let s = c.to_string();
+            let out = bytes(&character(&s), Some(&s), Modifiers::SHIFT)
+                .unwrap_or_else(|| panic!("{c} produced nothing"));
+            assert_eq!(out, s.as_bytes(), "for {c}");
+        }
+    }
+
+    #[test]
+    fn lowercase_still_works() {
+        let out = bytes(&character("d"), Some("d"), Modifiers::NONE).unwrap();
+        assert_eq!(out, b"d");
+    }
+
+    #[test]
+    fn shifted_symbols_reach_the_pty() {
+        for (key, expected) in [("!", "!"), ("@", "@"), ("~", "~"), ("?", "?")] {
+            let out = bytes(&character(key), Some(key), Modifiers::SHIFT).unwrap();
+            assert_eq!(out, expected.as_bytes(), "for {key}");
+        }
+    }
+
+    #[test]
+    fn ctrl_combinations_still_map_to_control_bytes() {
+        // Ctrl must bypass the text path entirely, or ctrl+c sends "c" and nothing
+        // can ever be interrupted.
+        let out = bytes(&character("c"), Some("c"), Modifiers::CTRL).unwrap();
+        assert_eq!(out, vec![0x03]);
+
+        // Case-insensitively, so ctrl+shift+c is also 0x03.
+        let out = bytes(
+            &character("C"),
+            Some("C"),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .unwrap();
+        assert_eq!(out, vec![0x03]);
+    }
+
+    #[test]
+    fn alt_prefixes_with_escape_rather_than_sending_bare_text() {
+        let out = bytes(&character("b"), Some("b"), Modifiers::ALT).unwrap();
+        assert_eq!(out, vec![0x1b, b'b']);
+    }
+
+    #[test]
+    fn control_characters_in_text_fall_through_to_the_encoder() {
+        // winit reports "\r" as the text for Enter. Sending it verbatim happens to
+        // be right, but Tab and Escape need the encoder's rules, so anything
+        // control-shaped must not take the text shortcut.
+        let out = bytes(&WKey::Named(WNamed::Enter), Some("\r"), Modifiers::NONE).unwrap();
+        assert_eq!(out, b"\r");
+
+        let out = bytes(&WKey::Named(WNamed::Tab), Some("\t"), Modifiers::NONE).unwrap();
+        assert_eq!(out, b"\t");
+
+        // Shift+Tab is back-tab, which only the encoder knows.
+        let out = bytes(&WKey::Named(WNamed::Tab), Some("\t"), Modifiers::SHIFT).unwrap();
+        assert_eq!(out, b"\x1b[Z");
+    }
+
+    #[test]
+    fn a_space_is_sent_as_a_space() {
+        let out = bytes(&WKey::Named(WNamed::Space), Some(" "), Modifiers::NONE).unwrap();
+        assert_eq!(out, b" ");
+    }
+
+    #[test]
+    fn multi_character_text_from_a_dead_key_is_sent_whole() {
+        // `key_from` rejects multi-character input, so without the text path an
+        // accented character composed from a dead key would be dropped entirely.
+        let out = bytes(&character("é"), Some("é"), Modifiers::NONE).unwrap();
+        assert_eq!(out, "é".as_bytes());
+
+        let out = bytes(&WKey::Dead(Some('´')), Some("é"), Modifiers::NONE).unwrap();
+        assert_eq!(out, "é".as_bytes(), "a dead-key composition must survive");
+    }
+
+    #[test]
+    fn arrows_use_the_encoder_and_respect_application_mode() {
+        // Arrows report no text, so they always go through the encoder.
+        let out = bytes(&WKey::Named(WNamed::ArrowUp), None, Modifiers::NONE).unwrap();
+        assert_eq!(out, b"\x1b[A");
+
+        let out = bytes_for_key(
+            &WKey::Named(WNamed::ArrowUp),
+            None,
+            Modifiers::NONE,
+            TermMode::APP_CURSOR,
+        )
+        .unwrap();
+        assert_eq!(out, b"\x1bOA");
+    }
+
+    #[test]
+    fn missing_text_falls_back_to_the_key_itself() {
+        // Some platforms report no text for an ordinary character.
+        let out = bytes(&character("x"), None, Modifiers::NONE).unwrap();
+        assert_eq!(out, b"x");
+    }
+
+    #[test]
+    fn a_bare_modifier_press_sends_nothing() {
+        assert_eq!(
+            bytes(&WKey::Named(WNamed::Control), None, Modifiers::NONE),
+            None
+        );
+        assert_eq!(
+            bytes(&WKey::Named(WNamed::Shift), None, Modifiers::SHIFT),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_text_is_not_sent_as_an_empty_write() {
+        // An empty write would be harmless but pointless; falling through to the
+        // encoder is the correct handling.
+        assert_eq!(bytes(&WKey::Dead(None), Some(""), Modifiers::NONE), None);
     }
 }

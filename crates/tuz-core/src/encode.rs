@@ -484,3 +484,60 @@ mod tests {
         assert!(s.ends_with("\x1b[201~"));
     }
 }
+
+#[cfg(test)]
+mod capital_letter_regression {
+    use super::*;
+    use tuz_input::KeyChord;
+
+    /// Capital letters must survive to the PTY.
+    ///
+    /// The bug this pins down: the app looked up keybindings using a *normalized*
+    /// chord — which lowercases the character so `ctrl+shift+d` can be matched — and
+    /// then encoded from that same normalized chord. Every capital letter arrived
+    /// lowercase, making it impossible to type uppercase text at all.
+    #[test]
+    fn encoding_a_capital_letter_yields_that_capital() {
+        let out = encode(Key::Char('D'), Modifiers::SHIFT, TermMode::empty()).unwrap();
+        assert_eq!(out, b"D", "shift+d must send 'D', not 'd'");
+
+        for c in ['A', 'Z', 'Q'] {
+            let out = encode(Key::Char(c), Modifiers::SHIFT, TermMode::empty()).unwrap();
+            assert_eq!(out, c.to_string().as_bytes(), "for {c}");
+        }
+    }
+
+    #[test]
+    fn a_normalized_chord_is_the_wrong_thing_to_encode() {
+        // Demonstrates why the app must not encode from the chord it looks up with:
+        // normalization is lossy in exactly the direction that breaks typing.
+        let normalized = KeyChord::char(Modifiers::NONE, 'D').normalized();
+        assert_eq!(normalized.key, Key::Char('d'), "normalization lowercases");
+
+        let wrong = encode(normalized.key, normalized.mods, TermMode::empty()).unwrap();
+        assert_eq!(
+            wrong, b"d",
+            "which is how the bug produced lowercase output"
+        );
+    }
+
+    #[test]
+    fn shift_does_not_disturb_control_combinations() {
+        // ctrl+shift+d must still be 0x04: the control mapping is case-insensitive.
+        let out = encode(
+            Key::Char('D'),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            TermMode::empty(),
+        )
+        .unwrap();
+        assert_eq!(out, vec![0x04]);
+    }
+
+    #[test]
+    fn shifted_symbols_pass_through_unchanged() {
+        for c in ['!', '@', '#', '$', '~', '?', '{'] {
+            let out = encode(Key::Char(c), Modifiers::SHIFT, TermMode::empty()).unwrap();
+            assert_eq!(out, c.to_string().as_bytes(), "for {c}");
+        }
+    }
+}

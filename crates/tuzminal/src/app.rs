@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tuz_config::{ConfigManager, Paths, ReloadOutcome};
 use tuz_core::{
-    encode, encode_paste, MouseButton, MouseReporting, PaneEvent, Session, TermEvent, TermSize,
+    encode_paste, MouseButton, MouseReporting, PaneEvent, Session, TermEvent, TermSize,
 };
 use tuz_font::FontSystem;
 use tuz_input::{Action, Keymap};
@@ -1077,8 +1077,13 @@ impl App {
             return;
         }
 
+        // Encoded from the raw key, never the normalized chord: see
+        // `keys::bytes_for_key` for why that distinction matters.
         let mode = self.focused_mode();
-        let Some(bytes) = encode(chord.key, chord.mods, mode) else {
+        let mods = keys::modifiers_from(self.modifiers);
+        let Some(bytes) =
+            keys::bytes_for_key(&event.logical_key, event.text.as_deref(), mods, mode)
+        else {
             return;
         };
 

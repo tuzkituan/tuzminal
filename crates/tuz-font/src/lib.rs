@@ -170,6 +170,14 @@ pub struct FontSystem {
     glyphs: HashMap<GlyphKey, RasterizedGlyph>,
     shape_cache: HashMap<(Style, String), Arc<Vec<ShapedGlyph>>>,
     scale: ScaleContext,
+
+    /// Kept alive after construction so a character none of the configured fonts
+    /// covers can still be found by scanning every installed face.
+    db: fontdb::Database,
+    /// Results of those scans, misses included. Without caching the misses, a
+    /// single unmappable character would rescan the whole font database on every
+    /// frame it is visible.
+    system_cache: HashMap<char, Option<FontId>>,
 }
 
 /// Initial atlas edge length in pixels. Large enough for a full Latin set at
@@ -257,6 +265,8 @@ impl FontSystem {
             glyphs: HashMap::new(),
             shape_cache: HashMap::new(),
             scale: ScaleContext::new(),
+            db,
+            system_cache: HashMap::new(),
         })
     }
 
@@ -286,26 +296,95 @@ impl FontSystem {
         }]
     }
 
-    /// Find a face that has a glyph for `c`: the styled face first, then the
-    /// fallback chain, then the regular face.
-    pub fn font_for_char(&self, c: char, style: Style) -> Option<(FontId, GlyphId)> {
+    /// Find a face that has a glyph for `c`.
+    ///
+    /// Four tiers: the styled face, the user's configured fallbacks, the regular
+    /// face, and finally **every installed font**. That last tier is what makes
+    /// powerline and Nerd Font glyphs appear: they live in fonts nobody thinks to
+    /// list, and a terminal that only searches a configured list silently drops
+    /// them while every other terminal on the system renders them fine.
+    ///
+    /// Takes `&mut self` because the system tier may need to load a face.
+    pub fn font_for_char(&mut self, c: char, style: Style) -> Option<(FontId, GlyphId)> {
+        if let Some(hit) = self.lookup_loaded(c, style) {
+            return Some(hit);
+        }
+
+        // A previous scan already answered for this character.
+        if let Some(cached) = self.system_cache.get(&c) {
+            let id = (*cached)?;
+            let glyph = self.glyph_in(id, c)?;
+            return Some((id, glyph));
+        }
+
+        let found = self.load_from_system(c);
+        self.system_cache.insert(c, found);
+        let id = found?;
+        let glyph = self.glyph_in(id, c)?;
+        Some((id, glyph))
+    }
+
+    /// Search only the faces already loaded, which is the hot path.
+    fn lookup_loaded(&self, c: char, style: Style) -> Option<(FontId, GlyphId)> {
         let primary = self.style_font(style);
         let candidates = std::iter::once(primary)
             .chain(self.fallbacks.iter().copied())
             .chain(std::iter::once(self.styles[0]));
 
         for id in candidates {
-            let face = self.face(id);
-            if let Some(font) = face.font_ref() {
-                let glyph = font.charmap().map(c);
-                // Glyph 0 is `.notdef`; treating it as a hit would render boxes
-                // instead of trying the next fallback.
-                if glyph != 0 {
-                    return Some((id, glyph));
-                }
+            if let Some(glyph) = self.glyph_in(id, c) {
+                return Some((id, glyph));
             }
         }
         None
+    }
+
+    /// The glyph for `c` in an already-loaded face, if it has a real one.
+    fn glyph_in(&self, id: FontId, c: char) -> Option<GlyphId> {
+        let font = self.faces.get(id.0 as usize)?.font_ref()?;
+        let glyph = font.charmap().map(c);
+        // Glyph 0 is `.notdef`; treating it as a hit renders boxes instead of
+        // trying the next candidate.
+        (glyph != 0).then_some(glyph)
+    }
+
+    /// Scan every installed face for one covering `c`, loading it if found.
+    ///
+    /// Linear over the font database, which is why the result is cached. Runs at
+    /// most once per distinct character.
+    fn load_from_system(&mut self, c: char) -> Option<FontId> {
+        let mut found: Option<(fontdb::ID, String)> = None;
+
+        for info in self.db.faces() {
+            let covered = self
+                .db
+                .with_face_data(info.id, |data, index| {
+                    FontRef::from_index(data, index as usize)
+                        .map(|font| font.charmap().map(c) != 0)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if covered {
+                let family = info
+                    .families
+                    .first()
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_default();
+                found = Some((info.id, family));
+                break;
+            }
+        }
+
+        let (id, family) = found?;
+        log::debug!("system fallback: U+{:04X} found in `{family}`", c as u32);
+
+        // `push_face` needs `&mut self.faces` while `self.db` is only read, so the
+        // scan above has to finish before this.
+        let mut faces = std::mem::take(&mut self.faces);
+        let result = push_face(&mut faces, &self.db, id, &family);
+        self.faces = faces;
+        result
     }
 
     /// Shape a run of text into positioned glyphs.
@@ -335,7 +414,8 @@ impl FontSystem {
         shaped
     }
 
-    fn shape_per_char(&self, text: &str, style: Style) -> Vec<ShapedGlyph> {
+    fn shape_per_char(&mut self, text: &str, style: Style) -> Vec<ShapedGlyph> {
+        let advance = self.metrics.width as f32;
         let mut out = Vec::with_capacity(text.len());
         for (offset, c) in text.char_indices() {
             if let Some((font, glyph)) = self.font_for_char(c, style) {
@@ -343,7 +423,7 @@ impl FontSystem {
                     font,
                     glyph,
                     cluster: offset as u32,
-                    x_advance: self.metrics.width as f32,
+                    x_advance: advance,
                     x_offset: 0.0,
                     y_offset: 0.0,
                 });
@@ -352,7 +432,7 @@ impl FontSystem {
         out
     }
 
-    fn shape_with_harfbuzz(&self, text: &str, style: Style) -> Vec<ShapedGlyph> {
+    fn shape_with_harfbuzz(&mut self, text: &str, style: Style) -> Vec<ShapedGlyph> {
         let font_id = self.style_font(style);
         let face = self.face(font_id);
         let Some(rb_face) = face.rustybuzz_face() else {
@@ -369,28 +449,17 @@ impl FontSystem {
 
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
+        let advance = self.metrics.width as f32;
 
         let mut out = Vec::with_capacity(infos.len());
-        for (info, pos) in infos.iter().zip(positions.iter()) {
-            // A zero glyph means this face cannot render the character, so fall
-            // back per-character for that cluster rather than drawing .notdef.
-            if info.glyph_id == 0 {
-                let cluster = info.cluster as usize;
-                if let Some(c) = text[cluster..].chars().next() {
-                    if let Some((fb_font, fb_glyph)) = self.font_for_char(c, style) {
-                        out.push(ShapedGlyph {
-                            font: fb_font,
-                            glyph: fb_glyph,
-                            cluster: info.cluster,
-                            x_advance: self.metrics.width as f32,
-                            x_offset: 0.0,
-                            y_offset: 0.0,
-                        });
-                        continue;
-                    }
-                }
-            }
+        // Clusters this face could not render. Resolved after the loop, because
+        // `rb_face` borrows the face data and fallback lookup needs `&mut self`.
+        let mut needs_fallback: Vec<usize> = Vec::new();
 
+        for (info, pos) in infos.iter().zip(positions.iter()) {
+            if info.glyph_id == 0 {
+                needs_fallback.push(out.len());
+            }
             out.push(ShapedGlyph {
                 font: font_id,
                 glyph: info.glyph_id as GlyphId,
@@ -399,6 +468,31 @@ impl FontSystem {
                 x_offset: pos.x_offset as f32 * scale,
                 y_offset: pos.y_offset as f32 * scale,
             });
+        }
+        drop(output);
+        drop(rb_face);
+
+        // Replace each .notdef with a fallback glyph, or drop it: drawing .notdef
+        // shows a box where another font has the real character.
+        for index in needs_fallback.into_iter().rev() {
+            let cluster = out[index].cluster as usize;
+            let resolved = text
+                .get(cluster..)
+                .and_then(|rest| rest.chars().next())
+                .and_then(|c| self.font_for_char(c, style));
+
+            match resolved {
+                Some((font, glyph)) => {
+                    out[index].font = font;
+                    out[index].glyph = glyph;
+                    out[index].x_advance = advance;
+                    out[index].x_offset = 0.0;
+                    out[index].y_offset = 0.0;
+                }
+                None => {
+                    out.remove(index);
+                }
+            }
         }
         out
     }
@@ -967,7 +1061,7 @@ mod tests {
 
     #[test]
     fn ascii_characters_resolve_to_real_glyphs() {
-        let sys = system();
+        let mut sys = system();
         for c in ['a', 'Z', '0', '#', '~'] {
             let (_, glyph) = sys
                 .font_for_char(c, Style::Regular)
@@ -978,7 +1072,7 @@ mod tests {
 
     #[test]
     fn an_unmappable_character_reports_no_glyph() {
-        let sys = system();
+        let mut sys = system();
         // A private-use codepoint no ordinary font covers.
         assert!(sys.font_for_char('\u{10FFFD}', Style::Regular).is_none());
     }
@@ -1114,5 +1208,188 @@ mod tests {
         embolden(&mut empty, 0, 0);
         shear(&mut empty, 0, 0);
         assert!(empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod system_fallback_tests {
+    use super::*;
+
+    fn system() -> FontSystem {
+        FontSystem::new(
+            &FontConfig {
+                family: "monospace".to_owned(),
+                size: 14.0,
+                // Deliberately empty: the point is that system fallback works even
+                // when the user has configured nothing.
+                fallback: Vec::new(),
+                ..FontConfig::default()
+            },
+            1.0,
+        )
+        .expect("a monospace font is required for these tests")
+    }
+
+    #[test]
+    fn powerline_glyphs_resolve_even_with_no_configured_fallbacks() {
+        // The bug this covers: prompts built with Starship/powerline draw a branch
+        // symbol and separators from the Private Use Area. Searching only the
+        // configured fallback list left them blank, while every other terminal on
+        // the machine rendered them via full fontconfig fallback.
+        let mut sys = system();
+
+        // U+E0A0 BRANCH, U+E0B0 SEPARATOR — the two most common powerline glyphs.
+        for c in ['\u{e0a0}', '\u{e0b0}'] {
+            let hit = sys.font_for_char(c, Style::Regular);
+            assert!(
+                hit.is_some(),
+                "U+{:04X} should resolve through system fallback",
+                c as u32
+            );
+            let (_, glyph) = hit.unwrap();
+            assert_ne!(glyph, 0, "U+{:04X} resolved to .notdef", c as u32);
+        }
+    }
+
+    #[test]
+    fn a_symbol_outside_the_primary_font_still_resolves() {
+        let mut sys = system();
+        // Geometric shapes and box drawing, common in TUI output and unlikely to be
+        // in a plain programming font.
+        for c in ['◆', '█', '▄', '⑂'] {
+            assert!(
+                sys.font_for_char(c, Style::Regular).is_some(),
+                "{c:?} (U+{:04X}) should resolve",
+                c as u32
+            );
+        }
+    }
+
+    /// Characters used by the shell prompt theme that exposed this bug.
+    ///
+    /// `cyberzsh` draws its branch marker, brackets and battery gauge from the
+    /// Miscellaneous Symbols and Geometric Shapes blocks — ordinary BMP codepoints
+    /// that a programming font has no reason to carry. Searching only the configured
+    /// fallback list left them blank while GNOME Terminal rendered them fine.
+    const PROMPT_SYMBOLS: &[char] = &[
+        '⑂',  // U+2442 branch
+        '◈',  // U+25C8 diamond
+        '▰',  // U+25B0 filled gauge segment
+        '▱',  // U+25B1 empty gauge segment
+        '⟦',  // U+27E6 bracket
+        '⟧',  // U+27E7 bracket
+        '❯',  // U+276F prompt arrow
+        '─',  // U+2500 box drawing
+        '▐',  // U+2590 half block
+        '⚙',  // U+2699 gear
+        '⚠',  // U+26A0 warning
+        '⚡', // U+26A1 high voltage
+        '✖',  // U+2716 cross
+        '…',  // U+2026 ellipsis
+    ];
+
+    #[test]
+    fn every_prompt_symbol_resolves_to_a_real_glyph() {
+        let mut sys = system();
+        for &c in PROMPT_SYMBOLS {
+            let hit = sys.font_for_char(c, Style::Regular);
+            assert!(
+                hit.is_some(),
+                "{c:?} (U+{:04X}) did not resolve; it would render as a blank cell",
+                c as u32
+            );
+            assert_ne!(hit.unwrap().1, 0, "{c:?} resolved to .notdef");
+        }
+    }
+
+    #[test]
+    fn prompt_symbols_actually_rasterize_to_pixels() {
+        // Resolving is only half the job: a glyph that resolves but rasterizes blank
+        // still leaves a hole in the prompt.
+        let mut sys = system();
+        for &c in PROMPT_SYMBOLS {
+            let Some((font, glyph)) = sys.font_for_char(c, Style::Regular) else {
+                panic!("{c:?} should resolve");
+            };
+            let raster = sys
+                .rasterize(font, glyph, Style::Regular)
+                .unwrap_or_else(|| panic!("{c:?} should rasterize"));
+            assert!(
+                !raster.is_blank(),
+                "{c:?} (U+{:04X}) rasterized to nothing",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_fallback_result_is_cached_rather_than_rescanned() {
+        // Scanning the whole font database is linear; doing it per frame for every
+        // visible symbol would be ruinous.
+        let mut sys = system();
+
+        // Find a symbol that genuinely needed the system scan on this machine. Which
+        // one that is depends on the installed fonts, so it is discovered rather
+        // than hardcoded — an earlier version of this test asserted U+E0A0 and
+        // failed because the primary font happened to carry it.
+        let scanned = PROMPT_SYMBOLS.iter().copied().find(|&c| {
+            sys.font_for_char(c, Style::Regular);
+            sys.system_cache.contains_key(&c)
+        });
+
+        let Some(c) = scanned else {
+            // Every symbol was already covered, so there is nothing to assert about
+            // caching. Say so rather than passing silently.
+            eprintln!("skipping: every prompt symbol is in an already-loaded font");
+            return;
+        };
+
+        let first = sys.font_for_char(c, Style::Regular);
+        assert!(first.is_some());
+        assert_eq!(
+            sys.font_for_char(c, Style::Regular),
+            first,
+            "a cached lookup must agree with the original"
+        );
+    }
+
+    #[test]
+    fn a_miss_is_cached_too() {
+        // Otherwise one unmappable character rescans every installed font on every
+        // frame it is on screen.
+        let mut sys = system();
+        let unmappable = '\u{10FFFD}';
+        assert!(sys.font_for_char(unmappable, Style::Regular).is_none());
+        assert_eq!(
+            sys.system_cache.get(&unmappable),
+            Some(&None),
+            "the miss must be remembered"
+        );
+    }
+
+    #[test]
+    fn ascii_never_reaches_the_system_scan() {
+        // The hot path must stay in the already-loaded faces.
+        let mut sys = system();
+        for c in ['a', 'Z', '0', '#'] {
+            assert!(sys.font_for_char(c, Style::Regular).is_some());
+        }
+        assert!(
+            sys.system_cache.is_empty(),
+            "ASCII should be served by the primary font, not by a database scan"
+        );
+    }
+
+    #[test]
+    fn a_system_fallback_glyph_can_be_rasterized() {
+        // Resolving is only half the job; it has to reach the atlas as pixels.
+        let mut sys = system();
+        let Some((font, glyph)) = sys.font_for_char('\u{e0a0}', Style::Regular) else {
+            panic!("U+E0A0 should resolve");
+        };
+        let raster = sys
+            .rasterize(font, glyph, Style::Regular)
+            .expect("should rasterize");
+        assert!(!raster.is_blank(), "the branch glyph should have pixels");
     }
 }

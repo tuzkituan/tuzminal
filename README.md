@@ -8,7 +8,7 @@ abstracted so macOS and Windows are a port rather than a rewrite.
 
 > **Status: M1–M5 complete.** It runs shells, renders text, splits, tabs with a
 > drawn tab bar, themes, a plugin status bar, and loads Lua and WASM plugins.
-> 438 tests pass, including GPU tests that read pixels back. macOS and Windows
+> 463 tests pass, including GPU tests that read pixels back. macOS and Windows
 > are untested. See [Status](#status) for the honest detail.
 
 ## Build and run
@@ -151,6 +151,13 @@ dividers, the tab bar and the status bar are all instanced quads in a single
 buffer with one pipeline. Glyphs are cached as white coverage and tinted in the
 shader, so one bitmap serves every color the character appears in.
 
+**Font fallback searches every installed font, not a configured list.** When the
+primary font and the user's fallbacks all lack a character, the whole font database
+is scanned for one that has it, and the answer is cached — misses included, or a
+single unmappable character would rescan every font on every frame. Without this,
+prompt symbols like `⑂` and `◈` render as blank cells while every other terminal on
+the machine draws them.
+
 **Chrome takes its colors from the theme.** The active tab uses the focused pane
 background so the strip reads as continuous with the terminal below it; the tab
 bar's height comes from the font metrics, not a fixed pixel value, so it scales
@@ -163,14 +170,14 @@ nothing.
 | Crate | Responsibility | Tests |
 |---|---|---|
 | `tuz-config` | TOML schema, themes, live reload, reload diffing | 57 |
-| `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 74 |
-| `tuz-font` | Discovery, fallback, shaping, glyph atlas | 34 |
+| `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 78 |
+| `tuz-font` | Discovery, system-wide fallback, shaping, glyph atlas | 42 |
 | `tuz-input` | Keychord grammar, actions, keymap | 39 |
 | `tuz-layout` | BSP split tree, tabs, chrome strips, geometric focus | 73 |
 | `tuz-plugin` | Host, Lua runtime, WASM runtime | 57 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
 | `tuz-render` | Instanced wgpu renderer, text layout, tab/status bars | 48 |
-| `tuzminal` | Application, GPU surface, CLI, package manager | 42 |
+| `tuzminal` | Application, GPU surface, CLI, package manager | 54 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
 implementation *and* a cross-platform PTY (openpty on unix, ConPTY on Windows)
@@ -194,7 +201,7 @@ or run** — treat it as unverified.
 ## Development
 
 ```bash
-cargo test --workspace --features tuz-core/test-util   # 438 tests
+cargo test --workspace --features tuz-core/test-util   # 463 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
 ```
