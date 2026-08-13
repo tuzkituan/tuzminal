@@ -34,12 +34,14 @@
 
 pub mod color;
 pub mod paths;
+pub mod save;
 pub mod schema;
 pub mod theme;
 pub mod watcher;
 
 pub use color::{ColorParseError, Rgba};
 pub use paths::{Paths, PathsError};
+pub use save::{save_config, SaveError};
 pub use schema::{
     Config, Cursor, CursorShape, Font, GpuBackend, Padding, Performance, Plugins, PowerPreference,
     ReloadActions, Scrollback, Shell, ValidationError, Window, DEFAULT_KEYS,
@@ -242,6 +244,16 @@ impl ConfigManager {
     /// Error from the most recent load attempt, if it failed.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// Write changed settings back to `config.toml`.
+    ///
+    /// `baseline` is what the file is believed to already contain — normally the
+    /// config as it was when the settings panel opened. Only differing keys are
+    /// written, and comments and formatting are preserved; see [`save`] for why that
+    /// matters.
+    pub fn save(&self, baseline: &Config) -> Result<PathBuf, SaveError> {
+        save::save_config(&self.paths.config_file(), self.config(), baseline)
     }
 
     /// Write [`EXAMPLE_CONFIG`] to the config path.

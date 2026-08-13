@@ -23,6 +23,7 @@ tuz-plugin = { path = "crates/tuz-plugin", version = "0.1.0" }
 tuz-plugin-api = { path = "crates/tuz-plugin-api", version = "0.1.0" }
 tuz-pty = { path = "crates/tuz-pty", version = "0.1.0" }
 tuz-render = { path = "crates/tuz-render", version = "0.1.0" }
+tuz-ui = { path = "crates/tuz-ui", version = "0.1.0" }
 
 # --- windowing / gpu ---
 winit = "0.30.13"
@@ -45,6 +46,8 @@ fontdb = "0.24.0"
 # --- config ---
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
+# Format-preserving TOML editing, so saving settings keeps the user's comments.
+toml_edit = "0.25"
 serde_json = "1"
 notify = "8.2.0"
 directories = "6.0.0"

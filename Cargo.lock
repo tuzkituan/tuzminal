@@ -3123,6 +3123,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -3177,6 +3178,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
+ "toml_edit",
 ]
 
 [[package]]
@@ -3258,6 +3260,14 @@ dependencies = [
  "tuz-layout",
  "unicode-width",
  "wgpu",
+]
+
+[[package]]
+name = "tuz-ui"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "tuz-layout",
 ]
 
 [[package]]
