@@ -1,0 +1,20 @@
+[package]
+name = "tuz-font"
+description = "Font discovery, shaping and glyph rasterization for Tuzminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tuz-config.workspace = true
+
+fontdb.workspace = true
+rustybuzz.workspace = true
+swash.workspace = true
+
+log.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true

@@ -1,0 +1,38 @@
+[package]
+name = "tuzminal"
+description = "A fast, modular, GPU-accelerated terminal emulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "tuzminal"
+
+[dependencies]
+tuz-config.workspace = true
+tuz-core.workspace = true
+tuz-font.workspace = true
+tuz-input.workspace = true
+tuz-layout.workspace = true
+tuz-plugin.workspace = true
+tuz-plugin-api.workspace = true
+tuz-render.workspace = true
+
+alacritty_terminal.workspace = true
+arboard.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+tuz-core = { workspace = true, features = ["test-util"] }

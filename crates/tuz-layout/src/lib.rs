@@ -1,0 +1,1099 @@
+//! Tab and pane layout for Tuzminal.
+//!
+//! A [`Layout`] owns a list of [`Tab`]s; each tab owns a BSP [`Node`] tree whose
+//! leaves are panes. This crate is deliberately pure — no PTYs, no rendering, no
+//! I/O — so the geometry and focus rules that are easy to get subtly wrong can be
+//! tested exhaustively.
+//!
+//! ```
+//! use tuz_layout::{Layout, LayoutOptions, CellSize, Direction, geom::Rect};
+//!
+//! let (mut layout, first) = Layout::new();
+//! let second = layout.split(Direction::Right).unwrap();
+//!
+//! let opts = LayoutOptions {
+//!     cell: CellSize { width: 8, height: 16 },
+//!     ..LayoutOptions::default()
+//! };
+//! let frame = layout.compute(Rect::from_size(800, 600), &opts);
+//! assert_eq!(frame.panes.len(), 2);
+//!
+//! // Focus follows the screen, not the tree.
+//! assert!(layout.focus_direction(Direction::Left, &frame));
+//! assert_eq!(layout.active_pane(), first);
+//! # let _ = second;
+//! ```
+
+pub mod geom;
+pub mod tree;
+
+pub use geom::{Axis, Direction, Rect};
+pub use tree::{Branch, DividerRect, Node, PaneId, PaneRect, SplitPath};
+
+/// Size of one character cell in physical pixels, from the font's metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Default for CellSize {
+    fn default() -> Self {
+        // A placeholder for tests and for the window that exists before fonts
+        // are loaded; the real value comes from `tuz-font`.
+        Self {
+            width: 8,
+            height: 16,
+        }
+    }
+}
+
+/// Inputs to a layout pass, derived from config plus font metrics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutOptions {
+    /// Per-pane inner padding in pixels.
+    pub padding_x: u16,
+    pub padding_y: u16,
+    /// Distribute the pixels left over after cell division evenly on both sides,
+    /// instead of letting them pile up on the right and bottom.
+    pub center_grid: bool,
+    pub divider_width: u32,
+    /// Height reserved at the top of the window for the tab bar. Zero hides it.
+    pub tab_bar_height: u32,
+    /// Height reserved at the bottom for the status bar. Zero hides it.
+    pub status_bar_height: u32,
+    /// Preferred width of one tab. Tabs shrink below this when there are many, and
+    /// never grow past it, so two tabs do not each take half the window.
+    pub tab_width: u32,
+    /// Floor on tab width. Below this a tab cannot show anything useful, so the
+    /// strip starts scrolling instead of shrinking further.
+    pub min_tab_width: u32,
+    pub cell: CellSize,
+}
+
+impl Default for LayoutOptions {
+    fn default() -> Self {
+        Self {
+            padding_x: 8,
+            padding_y: 8,
+            center_grid: true,
+            divider_width: 1,
+            tab_bar_height: 0,
+            status_bar_height: 0,
+            tab_width: 180,
+            min_tab_width: 60,
+            cell: CellSize::default(),
+        }
+    }
+}
+
+/// A pane's position and the terminal grid that fits inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneGeometry {
+    pub pane: PaneId,
+    /// Full pane extent, including padding. Use for scissor rects and for
+    /// painting the pane background.
+    pub rect: Rect,
+    /// Cell-aligned content area. Use as the origin for glyph placement.
+    pub content: Rect,
+    /// Grid size to report to the PTY. Always at least 1x1.
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Everything a frame needs to render, plus what a click needs to hit-test.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frame {
+    pub panes: Vec<PaneGeometry>,
+    pub dividers: Vec<DividerRect>,
+    /// Strip reserved for the tab bar. Empty when the bar is hidden.
+    pub tab_bar: Rect,
+    /// Strip reserved for the status bar. Empty when hidden.
+    pub status_bar: Rect,
+    /// One rect per tab, in tab order. Empty when the bar is hidden.
+    pub tabs: Vec<Rect>,
+}
+
+impl Frame {
+    pub fn pane(&self, id: PaneId) -> Option<&PaneGeometry> {
+        self.panes.iter().find(|p| p.pane == id)
+    }
+
+    /// Pane rects only, for the geometric focus helpers.
+    fn rects(&self) -> Vec<PaneRect> {
+        self.panes
+            .iter()
+            .map(|p| PaneRect {
+                pane: p.pane,
+                rect: p.rect,
+            })
+            .collect()
+    }
+
+    /// The pane under a window-relative point.
+    pub fn pane_at(&self, x: i32, y: i32) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .find(|p| p.rect.contains(x, y))
+            .map(|p| p.pane)
+    }
+
+    /// Convert a window-relative point to a cell within a pane, clamped to the
+    /// pane's grid so a drag that leaves the pane still selects its edge.
+    pub fn cell_at(&self, pane: PaneId, x: i32, y: i32, cell: CellSize) -> Option<(u16, u16)> {
+        let g = self.pane(pane)?;
+        if cell.width == 0 || cell.height == 0 {
+            return None;
+        }
+        let col =
+            ((x - g.content.x).max(0) as u32 / cell.width).min(g.cols.saturating_sub(1) as u32);
+        let row =
+            ((y - g.content.y).max(0) as u32 / cell.height).min(g.rows.saturating_sub(1) as u32);
+        Some((col as u16, row as u16))
+    }
+
+    /// The divider near a point, within a generous grab tolerance.
+    pub fn divider_at(&self, x: i32, y: i32, tolerance: u32) -> Option<&DividerRect> {
+        tree::divider_at(&self.dividers, x, y, tolerance)
+    }
+
+    /// The index of the tab under a point, if the click landed on the tab strip.
+    pub fn tab_at(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.tab_bar.contains(x, y) {
+            return None;
+        }
+        self.tabs.iter().position(|r| r.contains(x, y))
+    }
+
+    /// True when the point is on chrome rather than on a pane.
+    ///
+    /// Used to stop a click on the tab bar from also starting a text selection in
+    /// whichever pane happens to be underneath.
+    pub fn is_chrome(&self, x: i32, y: i32) -> bool {
+        self.tab_bar.contains(x, y) || self.status_bar.contains(x, y)
+    }
+}
+
+/// One tab: a pane tree plus which of its panes has focus.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tab {
+    root: Node,
+    focus: PaneId,
+    /// Explicit title set by a plugin or the user. When absent the UI falls back
+    /// to the focused pane's process title.
+    pub title: Option<String>,
+}
+
+impl Tab {
+    fn new(pane: PaneId) -> Self {
+        Self {
+            root: Node::leaf(pane),
+            focus: pane,
+            title: None,
+        }
+    }
+
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+    pub fn focus(&self) -> PaneId {
+        self.focus
+    }
+    pub fn panes(&self) -> Vec<PaneId> {
+        self.root.leaves()
+    }
+    pub fn pane_count(&self) -> usize {
+        self.root.pane_count()
+    }
+}
+
+/// What happened when a pane was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// The pane went away; focus moved to `new_focus`.
+    PaneClosed { new_focus: PaneId },
+    /// It was the tab's last pane, so the tab closed too. Another tab is active.
+    TabClosed,
+    /// It was the last pane of the last tab — the application should exit.
+    Emptied,
+    /// No such pane.
+    NotFound,
+}
+
+/// Tabs, panes, focus and id allocation for one window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    tabs: Vec<Tab>,
+    active: usize,
+    next_id: u32,
+}
+
+impl Layout {
+    /// Create a layout with one tab holding one pane, and return that pane's id.
+    pub fn new() -> (Self, PaneId) {
+        let first = PaneId(1);
+        (
+            Self {
+                tabs: vec![Tab::new(first)],
+                active: 0,
+                next_id: 2,
+            },
+            first,
+        )
+    }
+
+    fn alloc_pane(&mut self) -> PaneId {
+        let id = PaneId(self.next_id);
+        // Ids are never reused, so a message referring to a closed pane is
+        // detectably stale rather than silently aimed at a new one.
+        self.next_id += 1;
+        id
+    }
+
+    pub fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub fn active_tab(&self) -> &Tab {
+        // `active` is kept in range by every mutating method.
+        &self.tabs[self.active]
+    }
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    pub fn active_pane(&self) -> PaneId {
+        self.active_tab().focus
+    }
+
+    /// Every pane across every tab. Panes in inactive tabs still hold live PTYs.
+    pub fn all_panes(&self) -> Vec<PaneId> {
+        self.tabs.iter().flat_map(|t| t.panes()).collect()
+    }
+
+    /// Panes in the active tab, which are the only ones that need rendering.
+    pub fn visible_panes(&self) -> Vec<PaneId> {
+        self.active_tab().panes()
+    }
+
+    pub fn tab_of(&self, pane: PaneId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.root.contains(pane))
+    }
+
+    // --- panes ------------------------------------------------------------
+
+    /// Split the focused pane, moving focus to the new pane.
+    pub fn split(&mut self, dir: Direction) -> Option<PaneId> {
+        self.split_pane(self.active_pane(), dir)
+    }
+
+    /// Split a specific pane in whichever tab holds it.
+    pub fn split_pane(&mut self, pane: PaneId, dir: Direction) -> Option<PaneId> {
+        let tab_idx = self.tab_of(pane)?;
+        let new_pane = self.alloc_pane();
+        let tab = &mut self.tabs[tab_idx];
+        if tab.root.split_leaf(pane, new_pane, dir) {
+            tab.focus = new_pane;
+            Some(new_pane)
+        } else {
+            // Roll the id back: nothing was created, so consuming one would
+            // leave a confusing gap in the sequence.
+            self.next_id -= 1;
+            None
+        }
+    }
+
+    /// Close a pane, collapsing its split or its tab as needed.
+    pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
+        let Some(tab_idx) = self.tab_of(pane) else {
+            return CloseOutcome::NotFound;
+        };
+        let tab = &mut self.tabs[tab_idx];
+
+        if tab.root.remove_leaf(pane) {
+            // Focus the surviving neighbour. Tree order is a reasonable choice
+            // here: the sibling that absorbed the space is its first leaf.
+            if tab.focus == pane {
+                tab.focus = tab.root.first_leaf();
+            }
+            return CloseOutcome::PaneClosed {
+                new_focus: tab.focus,
+            };
+        }
+
+        // `remove_leaf` refuses the root leaf, so this was the tab's last pane.
+        self.tabs.remove(tab_idx);
+        if self.tabs.is_empty() {
+            return CloseOutcome::Emptied;
+        }
+        // Keep the neighbouring tab active rather than jumping to the start.
+        self.active = self.active.min(self.tabs.len() - 1);
+        CloseOutcome::TabClosed
+    }
+
+    /// Close the focused pane.
+    pub fn close_active_pane(&mut self) -> CloseOutcome {
+        self.close_pane(self.active_pane())
+    }
+
+    /// Give a specific pane focus, switching tabs if it lives elsewhere.
+    pub fn focus_pane(&mut self, pane: PaneId) -> bool {
+        match self.tab_of(pane) {
+            Some(idx) => {
+                self.active = idx;
+                self.tabs[idx].focus = pane;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move focus geometrically. Returns false at the edge of the layout.
+    ///
+    /// Takes the frame from the last layout pass because the decision is made on
+    /// what is on screen, not on tree structure.
+    pub fn focus_direction(&mut self, dir: Direction, frame: &Frame) -> bool {
+        let from = self.active_pane();
+        match tree::focus_neighbor(&frame.rects(), from, dir) {
+            Some(next) => {
+                self.active_tab_mut().focus = next;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Resize the focused pane along `dir` by a fraction of its parent split.
+    pub fn resize_active(&mut self, dir: Direction, delta: f32) -> Option<f32> {
+        let pane = self.active_pane();
+        self.active_tab_mut().root.resize_pane(pane, dir, delta)
+    }
+
+    /// Set a split's ratio directly, for mouse drags on a divider.
+    pub fn set_split_ratio(&mut self, path: &[Branch], ratio: f32) -> Option<f32> {
+        self.active_tab_mut().root.set_ratio_at(path, ratio)
+    }
+
+    // --- tabs -------------------------------------------------------------
+
+    /// Append a tab with a single pane and make it active.
+    pub fn new_tab(&mut self) -> PaneId {
+        let pane = self.alloc_pane();
+        self.tabs.push(Tab::new(pane));
+        self.active = self.tabs.len() - 1;
+        pane
+    }
+
+    /// Close a whole tab. Returns the panes it held so their PTYs can be closed.
+    pub fn close_tab(&mut self, index: usize) -> Option<Vec<PaneId>> {
+        if index >= self.tabs.len() {
+            return None;
+        }
+        let panes = self.tabs.remove(index).panes();
+        if !self.tabs.is_empty() {
+            // Closing a tab before the active one would otherwise shift the
+            // active index and silently switch tabs.
+            if self.active > index {
+                self.active -= 1;
+            }
+            self.active = self.active.min(self.tabs.len() - 1);
+        }
+        Some(panes)
+    }
+
+    /// True once the last tab is gone and the window should close.
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    pub fn select_tab(&mut self, index: usize) -> bool {
+        if index < self.tabs.len() {
+            self.active = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Advance to the next tab, wrapping. Tab cycling that stops at the end is
+    /// consistently more annoying than one that wraps.
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active = (self.active + 1) % self.tabs.len();
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+        }
+    }
+
+    // --- geometry ---------------------------------------------------------
+
+    /// Compute the frame for the active tab within `window`.
+    pub fn compute(&self, window: Rect, opts: &LayoutOptions) -> Frame {
+        let show_bar = opts.tab_bar_height > 0;
+        let tab_bar = if show_bar {
+            Rect::new(
+                window.x,
+                window.y,
+                window.width,
+                opts.tab_bar_height.min(window.height),
+            )
+        } else {
+            Rect::new(window.x, window.y, window.width, 0)
+        };
+
+        // The status bar takes from the bottom, so it is subtracted from the body
+        // height but does not move the body's origin.
+        let status_height = opts
+            .status_bar_height
+            .min(window.height.saturating_sub(tab_bar.height));
+        let status_bar = if status_height > 0 {
+            Rect::new(
+                window.x,
+                window.bottom() - status_height as i32,
+                window.width,
+                status_height,
+            )
+        } else {
+            Rect::new(window.x, window.bottom(), window.width, 0)
+        };
+
+        let body = Rect::new(
+            window.x,
+            window.y + tab_bar.height as i32,
+            window.width,
+            window
+                .height
+                .saturating_sub(tab_bar.height)
+                .saturating_sub(status_bar.height),
+        );
+
+        let tabs = if tab_bar.height > 0 {
+            tab_rects(tab_bar, self.tabs.len(), opts.tab_width, opts.min_tab_width)
+        } else {
+            Vec::new()
+        };
+
+        let (pane_rects, dividers) = self.active_tab().root.layout(body, opts.divider_width);
+        let panes = pane_rects
+            .into_iter()
+            .map(|pr| grid_for(pr, opts))
+            .collect();
+
+        Frame {
+            panes,
+            dividers,
+            tab_bar,
+            status_bar,
+            tabs,
+        }
+    }
+}
+
+/// Divide the tab strip into per-tab rects.
+///
+/// Tabs take `preferred` width until they would overflow, then share the strip
+/// equally down to `minimum`. Below that they stop shrinking and the surplus simply
+/// overflows the right edge — a tab narrower than a few characters conveys nothing,
+/// so shrinking further trades one unusable strip for another.
+pub fn tab_rects(bar: Rect, count: usize, preferred: u32, minimum: u32) -> Vec<Rect> {
+    if count == 0 || bar.height == 0 {
+        return Vec::new();
+    }
+    let preferred = preferred.max(1);
+    let minimum = minimum.min(preferred).max(1);
+
+    let equal = bar.width / count as u32;
+    let width = equal.min(preferred).max(minimum);
+
+    (0..count)
+        .map(|i| {
+            let x = bar.x + (i as u32 * width) as i32;
+            Rect::new(x, bar.y, width, bar.height)
+        })
+        .collect()
+}
+
+/// Fit a cell grid inside a pane rect.
+///
+/// Cell counts are floored so no partial row or column is ever reported to the
+/// PTY, then clamped to a minimum of 1x1: a pane too small for one cell still
+/// needs a valid grid, because `TIOCSWINSZ` with a zero dimension makes programs
+/// behave erratically.
+fn grid_for(pr: PaneRect, opts: &LayoutOptions) -> PaneGeometry {
+    let inner = pr.rect.inset(opts.padding_x as u32, opts.padding_y as u32);
+
+    let cell_w = opts.cell.width.max(1);
+    let cell_h = opts.cell.height.max(1);
+
+    let cols = (inner.width / cell_w).max(1);
+    let rows = (inner.height / cell_h).max(1);
+
+    let used_w = cols * cell_w;
+    let used_h = rows * cell_h;
+
+    let (x, y) = if opts.center_grid {
+        // Split the remainder between both edges so a window that is not an
+        // exact multiple of the cell size looks balanced instead of lopsided.
+        let slack_x = pr.rect.width.saturating_sub(used_w) / 2;
+        let slack_y = pr.rect.height.saturating_sub(used_h) / 2;
+        (pr.rect.x + slack_x as i32, pr.rect.y + slack_y as i32)
+    } else {
+        (inner.x, inner.y)
+    };
+
+    PaneGeometry {
+        pane: pr.pane,
+        rect: pr.rect,
+        content: Rect::new(x, y, used_w, used_h),
+        cols: cols.min(u16::MAX as u32) as u16,
+        rows: rows.min(u16::MAX as u32) as u16,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 8x16 cells, no padding or divider: pixel maths stay checkable by hand.
+    fn bare_opts() -> LayoutOptions {
+        LayoutOptions {
+            padding_x: 0,
+            padding_y: 0,
+            center_grid: false,
+            divider_width: 0,
+            tab_bar_height: 0,
+            status_bar_height: 0,
+            tab_width: 180,
+            min_tab_width: 60,
+            cell: CellSize {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    #[test]
+    fn a_new_layout_has_one_tab_with_one_focused_pane() {
+        let (l, first) = Layout::new();
+        assert_eq!(l.tab_count(), 1);
+        assert_eq!(l.active_pane(), first);
+        assert_eq!(l.all_panes(), [first]);
+    }
+
+    #[test]
+    fn splitting_moves_focus_to_the_new_pane() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        assert_eq!(l.active_pane(), second);
+        assert_eq!(l.active_tab().panes(), [first, second]);
+    }
+
+    #[test]
+    fn pane_ids_are_never_reused() {
+        // A recycled id would let a queued message for a dead pane land in a new
+        // one — a bug that only shows up under load.
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        l.close_pane(second);
+        let third = l.split(Direction::Right).unwrap();
+        assert_ne!(third, second);
+        assert!(third.0 > second.0);
+        let _ = first;
+    }
+
+    #[test]
+    fn a_failed_split_does_not_consume_a_pane_id() {
+        let (mut l, _) = Layout::new();
+        assert_eq!(l.split_pane(PaneId(999), Direction::Right), None);
+        let next = l.split(Direction::Right).unwrap();
+        assert_eq!(next, PaneId(2), "id sequence should have no gap");
+    }
+
+    #[test]
+    fn closing_a_pane_refocuses_a_survivor() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        match l.close_pane(second) {
+            CloseOutcome::PaneClosed { new_focus } => assert_eq!(new_focus, first),
+            other => panic!("expected PaneClosed, got {other:?}"),
+        }
+        assert_eq!(l.active_pane(), first);
+        assert_eq!(l.active_tab().pane_count(), 1);
+    }
+
+    #[test]
+    fn closing_a_pane_that_is_not_focused_leaves_focus_alone() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        assert_eq!(l.active_pane(), second);
+        l.close_pane(first);
+        assert_eq!(
+            l.active_pane(),
+            second,
+            "focus should not move unnecessarily"
+        );
+    }
+
+    #[test]
+    fn closing_the_last_pane_of_a_tab_closes_the_tab() {
+        let (mut l, first) = Layout::new();
+        l.new_tab();
+        assert_eq!(l.tab_count(), 2);
+
+        l.focus_pane(first);
+        assert!(matches!(l.close_pane(first), CloseOutcome::TabClosed));
+        assert_eq!(l.tab_count(), 1);
+    }
+
+    #[test]
+    fn closing_the_final_pane_reports_that_the_app_should_exit() {
+        let (mut l, first) = Layout::new();
+        assert!(matches!(l.close_pane(first), CloseOutcome::Emptied));
+        assert!(l.is_empty());
+    }
+
+    #[test]
+    fn closing_an_unknown_pane_is_reported_not_ignored() {
+        let (mut l, _) = Layout::new();
+        assert_eq!(l.close_pane(PaneId(404)), CloseOutcome::NotFound);
+    }
+
+    #[test]
+    fn tab_cycling_wraps_in_both_directions() {
+        let (mut l, _) = Layout::new();
+        l.new_tab();
+        l.new_tab();
+        assert_eq!(l.active_index(), 2);
+
+        l.next_tab();
+        assert_eq!(l.active_index(), 0, "next from the last wraps to the first");
+        l.prev_tab();
+        assert_eq!(l.active_index(), 2, "prev from the first wraps to the last");
+    }
+
+    #[test]
+    fn closing_an_earlier_tab_keeps_the_same_tab_active() {
+        // Removing an element before the active index shifts everything down;
+        // without compensating, the user silently lands on a different tab.
+        let (mut l, _) = Layout::new();
+        l.new_tab();
+        let third_pane = l.new_tab();
+        assert_eq!(l.active_index(), 2);
+
+        l.close_tab(0);
+        assert_eq!(l.active_index(), 1);
+        assert_eq!(l.active_pane(), third_pane, "still the same tab");
+    }
+
+    #[test]
+    fn closing_a_tab_returns_its_panes_so_their_ptys_can_be_reaped() {
+        let (mut l, _) = Layout::new();
+        let pane_a = l.new_tab();
+        let pane_b = l.split(Direction::Down).unwrap();
+
+        let closed = l.close_tab(1).unwrap();
+        assert_eq!(closed.len(), 2);
+        assert!(closed.contains(&pane_a) && closed.contains(&pane_b));
+    }
+
+    #[test]
+    fn focus_pane_switches_tabs_when_the_pane_lives_elsewhere() {
+        let (mut l, first) = Layout::new();
+        l.new_tab();
+        assert_eq!(l.active_index(), 1);
+
+        assert!(l.focus_pane(first));
+        assert_eq!(l.active_index(), 0);
+        assert!(!l.focus_pane(PaneId(999)));
+    }
+
+    #[test]
+    fn splitting_targets_only_the_tab_that_owns_the_pane() {
+        let (mut l, first) = Layout::new();
+        let other_tab_pane = l.new_tab();
+
+        // Split a pane in the inactive tab.
+        let added = l.split_pane(first, Direction::Right).unwrap();
+        assert_eq!(l.tab_of(added), Some(0));
+        assert_eq!(l.tabs()[1].pane_count(), 1, "the other tab is untouched");
+        let _ = other_tab_pane;
+    }
+
+    // --- geometry ---------------------------------------------------------
+
+    #[test]
+    fn a_single_pane_grid_divides_the_window_by_cell_size() {
+        let (l, first) = Layout::new();
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+
+        let g = f.pane(first).unwrap();
+        assert_eq!((g.cols, g.rows), (100, 37)); // 800/8, floor(600/16)
+        assert_eq!(g.content, Rect::new(0, 0, 800, 592));
+    }
+
+    #[test]
+    fn padding_shrinks_the_grid() {
+        let (l, first) = Layout::new();
+        let opts = LayoutOptions {
+            padding_x: 10,
+            padding_y: 8,
+            ..bare_opts()
+        };
+        let f = l.compute(Rect::from_size(800, 600), &opts);
+
+        let g = f.pane(first).unwrap();
+        // 800 - 20 = 780 -> 97 cols; 600 - 16 = 584 -> 36 rows.
+        assert_eq!((g.cols, g.rows), (97, 36));
+        assert_eq!(g.content.x, 10);
+        assert_eq!(g.content.y, 8);
+    }
+
+    #[test]
+    fn center_grid_balances_the_leftover_pixels() {
+        let (l, first) = Layout::new();
+        let opts = LayoutOptions {
+            center_grid: true,
+            ..bare_opts()
+        };
+        // 803 px / 8 = 100 cols using 800, leaving 3 px of slack.
+        let f = l.compute(Rect::from_size(803, 600), &opts);
+        let g = f.pane(first).unwrap();
+
+        assert_eq!(g.cols, 100);
+        assert_eq!(
+            g.content.x, 1,
+            "slack should be split, not dumped on one side"
+        );
+        assert_eq!(g.content.width, 800);
+    }
+
+    #[test]
+    fn a_pane_too_small_for_one_cell_still_reports_a_valid_grid() {
+        // TIOCSWINSZ with a zero dimension makes programs misbehave, so the
+        // floor is 1x1 even when the arithmetic says zero.
+        let (l, first) = Layout::new();
+        let f = l.compute(Rect::from_size(4, 4), &bare_opts());
+        let g = f.pane(first).unwrap();
+        assert_eq!((g.cols, g.rows), (1, 1));
+    }
+
+    #[test]
+    fn the_tab_bar_takes_height_off_the_top_of_the_panes() {
+        let (l, first) = Layout::new();
+        let opts = LayoutOptions {
+            tab_bar_height: 24,
+            ..bare_opts()
+        };
+        let f = l.compute(Rect::from_size(800, 600), &opts);
+
+        assert_eq!(f.tab_bar, Rect::new(0, 0, 800, 24));
+        let g = f.pane(first).unwrap();
+        assert_eq!(g.rect, Rect::new(0, 24, 800, 576));
+        assert_eq!(g.rows, 36); // 576/16
+    }
+
+    #[test]
+    fn hiding_the_tab_bar_gives_its_space_back() {
+        let (l, first) = Layout::new();
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+        assert_eq!(f.tab_bar.height, 0);
+        assert_eq!(f.pane(first).unwrap().rect.y, 0);
+    }
+
+    #[test]
+    fn split_panes_partition_the_window_without_overlap() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+
+        let a = f.pane(first).unwrap();
+        let b = f.pane(second).unwrap();
+        assert_eq!(a.rect.right(), b.rect.x, "no gap or overlap between panes");
+        assert_eq!(a.cols + b.cols, 100);
+    }
+
+    #[test]
+    fn focus_direction_follows_the_rendered_frame() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+
+        assert_eq!(l.active_pane(), second);
+        assert!(l.focus_direction(Direction::Left, &f));
+        assert_eq!(l.active_pane(), first);
+
+        // At the edge, focus stays put and the caller learns nothing happened.
+        assert!(!l.focus_direction(Direction::Left, &f));
+        assert_eq!(l.active_pane(), first);
+    }
+
+    #[test]
+    fn pane_at_maps_a_click_to_a_pane() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Right).unwrap();
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+
+        assert_eq!(f.pane_at(10, 10), Some(first));
+        assert_eq!(f.pane_at(500, 10), Some(second));
+        assert_eq!(f.pane_at(10_000, 10), None);
+    }
+
+    #[test]
+    fn cell_at_converts_pixels_to_grid_coordinates() {
+        let (l, first) = Layout::new();
+        let opts = bare_opts();
+        let f = l.compute(Rect::from_size(800, 600), &opts);
+
+        assert_eq!(f.cell_at(first, 0, 0, opts.cell), Some((0, 0)));
+        assert_eq!(f.cell_at(first, 8, 16, opts.cell), Some((1, 1)));
+        assert_eq!(f.cell_at(first, 23, 47, opts.cell), Some((2, 2)));
+    }
+
+    #[test]
+    fn cell_at_clamps_a_drag_that_leaves_the_pane() {
+        // Selection dragging past the edge should extend to the last cell, not
+        // return None and abandon the drag.
+        let (l, first) = Layout::new();
+        let opts = bare_opts();
+        let f = l.compute(Rect::from_size(800, 600), &opts);
+
+        assert_eq!(f.cell_at(first, -50, -50, opts.cell), Some((0, 0)));
+        assert_eq!(f.cell_at(first, 99_999, 99_999, opts.cell), Some((99, 36)));
+    }
+
+    #[test]
+    fn resize_active_adjusts_the_relevant_divider() {
+        let (mut l, _) = Layout::new();
+        l.split(Direction::Right);
+        // Focus is on the right pane; growing it leftward shrinks the ratio.
+        let r = l.resize_active(Direction::Left, 0.1).unwrap();
+        assert!((r - 0.4).abs() < 1e-6, "got {r}");
+    }
+
+    #[test]
+    fn divider_hit_testing_finds_the_split_to_drag() {
+        let (mut l, _) = Layout::new();
+        l.split(Direction::Right);
+        let opts = LayoutOptions {
+            divider_width: 2,
+            ..bare_opts()
+        };
+        let f = l.compute(Rect::from_size(802, 600), &opts);
+
+        let d = f
+            .divider_at(401, 300, 4)
+            .expect("divider should be grabbable");
+        assert_eq!(d.axis, Axis::Horizontal);
+
+        // Dragging it to 25% must actually move the panes.
+        l.set_split_ratio(&d.path.clone(), 0.25);
+        let f2 = l.compute(Rect::from_size(802, 600), &opts);
+        assert_eq!(f2.panes[0].rect.width, 200);
+    }
+
+    #[test]
+    fn a_deeply_nested_layout_stays_consistent() {
+        // Build a 4-pane grid and assert the panes exactly tile the window.
+        let (mut l, first) = Layout::new();
+        let right = l.split(Direction::Right).unwrap();
+        l.focus_pane(first);
+        l.split(Direction::Down);
+        l.focus_pane(right);
+        l.split(Direction::Down);
+
+        let f = l.compute(Rect::from_size(800, 600), &bare_opts());
+        assert_eq!(f.panes.len(), 4);
+
+        let area: u32 = f.panes.iter().map(|p| p.rect.width * p.rect.height).sum();
+        assert_eq!(area, 800 * 600, "panes must tile the window exactly");
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+
+    fn bar(width: u32) -> Rect {
+        Rect::new(0, 0, width, 24)
+    }
+
+    #[test]
+    fn no_tabs_means_no_rects() {
+        assert!(tab_rects(bar(800), 0, 180, 60).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_bar_produces_no_rects() {
+        // Height zero is how the bar is hidden, so it must short-circuit.
+        assert!(tab_rects(Rect::new(0, 0, 800, 0), 3, 180, 60).is_empty());
+    }
+
+    #[test]
+    fn few_tabs_take_the_preferred_width_not_the_whole_strip() {
+        // Two tabs each taking half an 800px window would look absurd.
+        let rects = tab_rects(bar(800), 2, 180, 60);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width, 180);
+        assert_eq!(rects[1].x, 180);
+    }
+
+    #[test]
+    fn many_tabs_share_the_strip_equally() {
+        let rects = tab_rects(bar(800), 8, 180, 60);
+        assert_eq!(rects.len(), 8);
+        assert_eq!(rects[0].width, 100, "800/8");
+        // And they tile without gaps.
+        for pair in rects.windows(2) {
+            assert_eq!(pair[0].right(), pair[1].x);
+        }
+    }
+
+    #[test]
+    fn tabs_stop_shrinking_at_the_minimum() {
+        // Twenty tabs in 800px would be 40px each, which shows nothing useful.
+        let rects = tab_rects(bar(800), 20, 180, 60);
+        assert!(
+            rects.iter().all(|r| r.width == 60),
+            "expected the floor to apply, got {:?}",
+            rects.first()
+        );
+    }
+
+    #[test]
+    fn a_minimum_larger_than_the_preferred_width_is_clamped() {
+        // Misconfiguration must not produce tabs wider than requested.
+        let rects = tab_rects(bar(800), 2, 100, 500);
+        assert_eq!(rects[0].width, 100);
+    }
+
+    #[test]
+    fn tab_rects_inherit_the_strip_position_and_height() {
+        let rects = tab_rects(Rect::new(10, 5, 400, 30), 2, 180, 60);
+        assert_eq!(rects[0].x, 10);
+        assert_eq!(rects[0].y, 5);
+        assert_eq!(rects[0].height, 30);
+    }
+
+    /// Options with both strips visible, for the reservation tests.
+    fn opts_with_chrome() -> LayoutOptions {
+        LayoutOptions {
+            padding_x: 0,
+            padding_y: 0,
+            center_grid: false,
+            divider_width: 0,
+            tab_bar_height: 24,
+            status_bar_height: 20,
+            tab_width: 180,
+            min_tab_width: 60,
+            cell: CellSize {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    #[test]
+    fn both_strips_are_reserved_out_of_the_pane_area() {
+        let (l, first) = Layout::new();
+        let f = l.compute(Rect::from_size(800, 600), &opts_with_chrome());
+
+        assert_eq!(f.tab_bar, Rect::new(0, 0, 800, 24));
+        assert_eq!(f.status_bar, Rect::new(0, 580, 800, 20));
+
+        let pane = f.pane(first).unwrap();
+        assert_eq!(pane.rect.y, 24, "panes start below the tab bar");
+        assert_eq!(pane.rect.bottom(), 580, "panes stop above the status bar");
+        assert_eq!(pane.rect.height, 556, "600 - 24 - 20");
+    }
+
+    #[test]
+    fn hiding_both_strips_gives_the_whole_window_to_panes() {
+        let (l, first) = Layout::new();
+        let opts = LayoutOptions {
+            tab_bar_height: 0,
+            status_bar_height: 0,
+            ..opts_with_chrome()
+        };
+        let f = l.compute(Rect::from_size(800, 600), &opts);
+
+        assert_eq!(f.tab_bar.height, 0);
+        assert_eq!(f.status_bar.height, 0);
+        assert!(f.tabs.is_empty());
+        assert_eq!(f.pane(first).unwrap().rect, Rect::from_size(800, 600));
+    }
+
+    #[test]
+    fn a_tab_rect_exists_for_every_tab() {
+        let (mut l, _) = Layout::new();
+        l.new_tab();
+        l.new_tab();
+        let f = l.compute(Rect::from_size(800, 600), &opts_with_chrome());
+        assert_eq!(f.tabs.len(), 3);
+    }
+
+    #[test]
+    fn clicking_the_strip_maps_to_a_tab_index() {
+        let (mut l, _) = Layout::new();
+        l.new_tab();
+        let f = l.compute(Rect::from_size(800, 600), &opts_with_chrome());
+
+        assert_eq!(f.tab_at(10, 12), Some(0));
+        assert_eq!(f.tab_at(190, 12), Some(1));
+        // Past the last tab is still the strip, but not a tab.
+        assert_eq!(f.tab_at(700, 12), None);
+        // Below the strip is a pane, not a tab.
+        assert_eq!(f.tab_at(10, 200), None);
+    }
+
+    #[test]
+    fn chrome_hit_testing_covers_both_strips_but_not_panes() {
+        // Without this a click on the tab bar would also start a text selection in
+        // the pane underneath.
+        let (l, _) = Layout::new();
+        let f = l.compute(Rect::from_size(800, 600), &opts_with_chrome());
+
+        assert!(f.is_chrome(400, 5), "tab bar");
+        assert!(f.is_chrome(400, 590), "status bar");
+        assert!(!f.is_chrome(400, 300), "pane area");
+    }
+
+    #[test]
+    fn a_window_too_short_for_its_chrome_does_not_underflow() {
+        // Resizing a window very small must not produce a negative pane height.
+        let (l, first) = Layout::new();
+        let f = l.compute(Rect::from_size(200, 10), &opts_with_chrome());
+
+        assert!(f.tab_bar.height <= 10);
+        let pane = f.pane(first).unwrap();
+        // The grid floor still applies, so the pane reports a usable grid.
+        assert!(pane.cols >= 1 && pane.rows >= 1);
+    }
+
+    #[test]
+    fn splits_divide_only_the_body_not_the_chrome() {
+        let (mut l, first) = Layout::new();
+        let second = l.split(Direction::Down).unwrap();
+        let f = l.compute(Rect::from_size(800, 600), &opts_with_chrome());
+
+        let top = f.pane(first).unwrap().rect;
+        let bottom = f.pane(second).unwrap().rect;
+        assert_eq!(top.y, 24, "the upper pane starts below the tab bar");
+        assert_eq!(
+            bottom.bottom(),
+            580,
+            "the lower pane stops above the status bar"
+        );
+        assert_eq!(top.height + bottom.height, 556);
+    }
+}

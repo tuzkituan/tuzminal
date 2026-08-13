@@ -1,0 +1,188 @@
+# Tuzminal configuration
+#
+# Every setting below is optional — this file may contain as little or as much as
+# you like, and anything omitted keeps its default. Saving the file applies most
+# changes immediately; the few that need a restart are called out below.
+#
+# Unknown keys are reported as errors rather than ignored, so a typo shows up as
+# a message instead of a setting that mysteriously does nothing.
+
+# Name of a theme in ~/.config/tuzminal/themes, an installed theme, or a
+# built-in ("tuz-dark", "tuz-light"). List them with `tuzminal theme list`.
+theme = "tuz-dark"
+
+
+[font]
+family = "monospace"
+size = 12.0
+
+# Enable programming ligatures (=>, !=, ...). Requires a font that has them,
+# such as Fira Code, JetBrains Mono or Cascadia Code.
+ligatures = false
+
+# Families searched, in order, for glyphs the primary font lacks.
+fallback = ["Noto Color Emoji", "Symbols Nerd Font", "Noto Sans CJK JP"]
+
+# Per-style overrides. Omit to use the matching style of `family`.
+# bold_family = "JetBrains Mono Bold"
+# italic_family = "Maple Mono Italic"
+# bold_italic_family = "JetBrains Mono Bold Italic"
+
+# Multipliers on the font's natural metrics. Raise line_height for airier rows.
+line_height = 1.0
+cell_width = 1.0
+
+# Fake bold/italic when the font has no such face.
+synthetic_bold = true
+synthetic_italic = true
+
+# Not yet implemented: the renderer currently always uses grayscale coverage.
+# grayscale_antialiasing = true
+
+# Arbitrary OpenType features, as four-character tags.
+# [font.features]
+# ss01 = 1
+# zero = 1
+
+
+[window]
+padding = { x = 8, y = 8 }
+
+# Distribute leftover pixels evenly instead of leaving a gap on one edge.
+center_grid = true
+
+# Needs a compositor that supports transparency.
+opacity = 1.0
+
+decorations = true
+
+# Initial size, in cells.
+columns = 100
+rows = 30
+
+title = "Tuzminal"
+# Let programs retitle the window via OSC 0/2.
+dynamic_title = true
+
+split_divider_width = 1
+always_show_tab_bar = false
+
+
+[cursor]
+# "block", "beam", "underline", or "hollow_block"
+shape = "block"
+blink = true
+blink_interval_ms = 500
+# Stop blinking after this long without input. 0 disables the timeout.
+blink_timeout_secs = 10
+unfocused_shape = "hollow_block"
+# Honor DECSCUSR from the running program (vim changing shape per mode).
+allow_program_override = true
+# Beam/underline thickness, as a fraction of the cell.
+thickness = 0.15
+
+
+[scrollback]
+# Roughly `lines * columns * 16` bytes of memory per pane.
+lines = 10000
+scroll_multiplier = 3
+scroll_to_bottom_on_output = false
+scroll_to_bottom_on_input = true
+
+
+[shell]
+# Defaults to $SHELL. Set to override.
+# program = "/usr/bin/fish"
+# args = ["--login"]
+
+# Set to "inherit_pane" to open new panes in the focused pane's directory.
+# working_directory = "inherit_pane"
+
+# "xterm-256color" is understood everywhere, including over ssh to hosts that
+# have never heard of Tuzminal. Only set "tuzminal" if its terminfo is installed.
+term = "xterm-256color"
+
+# [shell.env]
+# EDITOR = "nvim"
+
+
+[performance]
+# "auto", "vulkan", "metal", "dx12", "gl". Requires a restart to change.
+gpu_backend = "auto"
+
+# "low_power" or "high_performance". A terminal does not need a discrete GPU;
+# low_power gives identical output for less battery. Requires a restart.
+power_preference = "low_power"
+
+vsync = true
+# Frame ceiling when vsync is off. 0 means unlimited.
+max_fps = 0
+
+# Redraw only what changed. Turn off only to diagnose rendering artifacts.
+damage_tracking = true
+
+
+[plugins]
+enabled = true
+
+# Load only these plugins, by name. Empty means every plugin found on disk.
+load = []
+# Skip these even when present.
+disable = []
+
+# A plugin callback exceeding this budget is aborted, so a bad plugin cannot
+# freeze the terminal.
+callback_timeout_ms = 250
+
+# Every keystroke waits up to this long for plugin key handlers. Keep it small;
+# values above 50ms are rejected as visible input lag.
+key_hook_timeout_ms = 5
+
+
+# Keybindings map a chord to an action. Modifiers are ctrl, shift, alt, super,
+# joined with `+`.
+#
+# Entries here are layered ON TOP OF the defaults rather than replacing them, so
+# adding one binding does not cost you the rest. The list below is exactly the
+# default set, spelled out for reference — delete any line you do not want to
+# change. To remove a default binding, set it to "none":
+#
+#   "ctrl+shift+t" = "none"
+#
+# Available actions:
+#   split_right split_down close_pane
+#   focus_left focus_right focus_up focus_down
+#   new_tab close_tab next_tab prev_tab
+#   copy paste
+#   increase_font_size decrease_font_size reset_font_size
+#   scroll_page_up scroll_page_down scroll_to_top scroll_to_bottom
+#   reload_config quit
+[keys]
+"ctrl+shift+d" = "split_right"
+"ctrl+shift+e" = "split_down"
+"ctrl+shift+w" = "close_pane"
+
+"ctrl+shift+t" = "new_tab"
+"ctrl+tab" = "next_tab"
+"ctrl+shift+tab" = "prev_tab"
+
+"ctrl+shift+h" = "focus_left"
+"ctrl+shift+j" = "focus_down"
+"ctrl+shift+k" = "focus_up"
+"ctrl+shift+l" = "focus_right"
+"ctrl+shift+left" = "focus_left"
+"ctrl+shift+down" = "focus_down"
+"ctrl+shift+up" = "focus_up"
+"ctrl+shift+right" = "focus_right"
+
+"ctrl+shift+c" = "copy"
+"ctrl+shift+v" = "paste"
+
+"ctrl+shift+plus" = "increase_font_size"
+"ctrl+shift+minus" = "decrease_font_size"
+"ctrl+shift+0" = "reset_font_size"
+
+"shift+pageup" = "scroll_page_up"
+"shift+pagedown" = "scroll_page_down"
+
+"ctrl+shift+r" = "reload_config"

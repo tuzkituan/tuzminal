@@ -1,0 +1,32 @@
+[package]
+name = "tuz-plugin"
+description = "Plugin host for Tuzminal, with Lua and WebAssembly runtimes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["lua", "wasm"]
+# Each runtime is optional so a minimal build can drop a heavy dependency.
+lua = ["dep:mlua"]
+wasm = ["dep:wasmtime"]
+
+[dependencies]
+tuz-config.workspace = true
+tuz-plugin-api.workspace = true
+
+mlua = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+# WebAssembly text format, so the WASM tests need no cross-compiler.
+wat = "1"

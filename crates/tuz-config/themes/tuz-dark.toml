@@ -1,0 +1,33 @@
+name = "tuz-dark"
+
+background = "#16181d"
+foreground = "#c8ccd4"
+
+cursor = "#7aa2f7"
+cursor_text = "#16181d"
+
+selection_background = "#2d3346"
+selection_foreground = "#c8ccd4"
+
+background_focused = "#1a1d23"
+split_divider = "#2a2e39"
+
+[normal]
+black   = "#3b4048"
+red     = "#e06c75"
+green   = "#98c379"
+yellow  = "#e5c07b"
+blue    = "#61afef"
+magenta = "#c678dd"
+cyan    = "#56b6c2"
+white   = "#abb2bf"
+
+[bright]
+black   = "#5c6370"
+red     = "#ef8a92"
+green   = "#b3d68f"
+yellow  = "#f0d399"
+blue    = "#82c4ff"
+magenta = "#d79ae8"
+cyan    = "#73ced9"
+white   = "#e6e9ef"

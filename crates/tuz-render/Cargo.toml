@@ -1,0 +1,23 @@
+[package]
+name = "tuz-render"
+description = "GPU cell renderer for Tuzminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tuz-config.workspace = true
+tuz-core.workspace = true
+tuz-font.workspace = true
+tuz-layout.workspace = true
+
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+tuz-core = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tuannguyen/tuzminal"
+authors = ["Tuz <lewis.nguyen@terralogic.com>"]
+
+# Single source of truth for dependency versions across the workspace.
+# Member crates reference these with `dep.workspace = true`.
+[workspace.dependencies]
+# --- internal ---
+tuz-config = { path = "crates/tuz-config", version = "0.1.0" }
+tuz-core = { path = "crates/tuz-core", version = "0.1.0" }
+tuz-font = { path = "crates/tuz-font", version = "0.1.0" }
+tuz-input = { path = "crates/tuz-input", version = "0.1.0" }
+tuz-layout = { path = "crates/tuz-layout", version = "0.1.0" }
+tuz-plugin = { path = "crates/tuz-plugin", version = "0.1.0" }
+tuz-plugin-api = { path = "crates/tuz-plugin-api", version = "0.1.0" }
+tuz-pty = { path = "crates/tuz-pty", version = "0.1.0" }
+tuz-render = { path = "crates/tuz-render", version = "0.1.0" }
+
+# --- windowing / gpu ---
+winit = "0.30.13"
+wgpu = "30.0.0"
+raw-window-handle = "0.6.2"
+pollster = "1.0.1"
+bytemuck = { version = "1.25", features = ["derive"] }
+
+# --- terminal ---
+alacritty_terminal = "0.26.0"
+portable-pty = "0.9.0"
+unicode-width = "0.2.2"
+arboard = { version = "3", default-features = false }
+
+# --- fonts ---
+swash = "0.2.10"
+rustybuzz = "0.20.1"
+fontdb = "0.24.0"
+
+# --- config ---
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+serde_json = "1"
+notify = "8.2.0"
+directories = "6.0.0"
+
+# --- plugins ---
+mlua = { version = "0.12.0", features = ["lua54", "vendored"] }
+wasmtime = "47.0.3"
+
+# --- infra ---
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+crossbeam-channel = "0.5.16"
+parking_lot = "0.12.5"
+log = "0.4.33"
+env_logger = "0.11.11"
+clap = { version = "4.6.6", features = ["derive"] }
+
+[profile.release]
+# A terminal is latency-sensitive: one codegen unit and LTO measurably help the
+# hot render/parse loops. Keep debug symbols so perf profiles stay readable.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+# Debug builds of a GPU app are unusably slow without optimizing dependencies.
+[profile.dev.package."*"]
+opt-level = 2

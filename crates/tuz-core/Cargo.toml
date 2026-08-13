@@ -1,0 +1,28 @@
+[package]
+name = "tuz-core"
+description = "Terminal state, PTY sessions and color resolution for Tuzminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Exposes `Session::detached` and `feed_for_test` to downstream test suites.
+test-util = ["tuz-config/test-util"]
+
+[dependencies]
+tuz-config.workspace = true
+tuz-input.workspace = true
+tuz-layout.workspace = true
+
+alacritty_terminal.workspace = true
+
+crossbeam-channel.workspace = true
+log.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+tuz-config = { workspace = true, features = ["test-util"] }
