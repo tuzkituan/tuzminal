@@ -177,7 +177,7 @@ nothing.
 | `tuz-plugin` | Host, Lua runtime, WASM runtime | 57 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
 | `tuz-render` | Instanced wgpu renderer, text layout, tab/status bars | 48 |
-| `tuzminal` | Application, GPU surface, CLI, package manager | 54 |
+| `tuzminal` | Application, GPU surface, CLI, package manager | 55 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
 implementation *and* a cross-platform PTY (openpty on unix, ConPTY on Windows)
