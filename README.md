@@ -1,154 +1,216 @@
 # Tuzminal
 
-A fast, modular, GPU-accelerated terminal emulator with tabs, split panes,
-installable themes, and a plugin system that runs both Lua and WebAssembly.
+A fast, modular, GPU-accelerated terminal emulator with tabs, split panes, a file
+explorer, installable themes, and a plugin system that runs both Lua and WebAssembly.
+
+![Tuzminal running `sudo dnf update`](docs/preview.png)
 
 Built in Rust on `winit` + `wgpu`. Linux/Wayland first, with the platform layer
 abstracted so macOS and Windows are a port rather than a rewrite.
 
-> **Status: M1–M5 complete.** It runs shells, renders text, splits, tabs with a
-> drawn tab bar, themes, a plugin status bar, and loads Lua and WASM plugins.
-> 613 tests pass, including GPU tests that read pixels back. macOS and Windows
-> are untested. See [Status](#status) for the honest detail.
+> **Honest status.** It runs shells, splits, tabs, themes, plugins and a file
+> browser, with 757 tests including GPU tests that read pixels back. **macOS and
+> Windows compile but have never been run.** The working-directory features are
+> Linux-only, because they read `/proc`. See [Status](#status).
 
-## Build and run
+---
 
-Requires Rust 1.85+ and, on Linux, the Wayland/X11 and fontconfig development
-packages.
+## Install
+
+### Dependencies
+
+You need Rust 1.85 or newer, plus the Wayland/X11 and font development packages.
 
 ```bash
 # Fedora
 sudo dnf install wayland-devel libxkbcommon-devel fontconfig-devel libX11-devel
 
-cargo build --release
-./target/release/tuzminal
+# Debian / Ubuntu
+sudo apt install libwayland-dev libxkbcommon-dev libfontconfig-1-dev libx11-dev
+
+# Arch
+sudo pacman -S wayland libxkbcommon fontconfig libx11
 ```
+
+### Install the terminal
+
+```bash
+git clone https://github.com/tuzkituan/tuzminal
+cd tuzminal
+cargo install --path crates/tuzminal --locked
+```
+
+That puts `tuzminal` in `~/.cargo/bin`. If your shell cannot find it, that
+directory is not on your `PATH` — `source ~/.cargo/env` fixes the current shell,
+and the Rust installer normally adds it to your shell profile.
+
+### Add it to your applications list
+
+`cargo install` only installs a binary, so the terminal will not appear in your
+desktop's app grid until you ask for it:
+
+```bash
+tuzminal --install-desktop-entry
+```
+
+This writes two files and prints where they went:
+
+| File | Purpose |
+|---|---|
+| `~/.local/share/applications/tuzminal.desktop` | the menu entry |
+| `~/.local/share/icons/hicolor/scalable/apps/tuzminal.svg` | the icon |
+
+Some desktops pick it up immediately; others need a log out and back in. The entry
+records the **absolute** path to the binary, because a desktop launcher runs with
+the session's environment, which usually does not include `~/.cargo/bin`. Re-run
+the command after moving or reinstalling the binary.
+
+### Set it as your default terminal
+
+GNOME:
+
+```bash
+gsettings set org.gnome.desktop.default-applications.terminal exec tuzminal
+```
+
+---
+
+## Uninstall
+
+```bash
+cargo uninstall tuzminal
+rm -f ~/.local/share/applications/tuzminal.desktop
+rm -f ~/.local/share/icons/hicolor/scalable/apps/tuzminal.svg
+```
+
+That removes the program. Your settings, themes and plugins are left alone; to
+remove those too:
+
+```bash
+rm -rf ~/.config/tuzminal    # config, your themes, your plugins
+rm -rf ~/.local/share/tuzminal   # installed themes and plugins
+```
+
+Nothing else is written anywhere. There is no daemon, no autostart entry, and no
+files outside those four locations.
+
+---
 
 ## Using it
 
 ```bash
-tuzminal --init-config     # write a commented starter config
+tuzminal                   # start a shell
+tuzminal -e htop           # run a command instead
 tuzminal --config-check    # validate config, theme, keybindings and plugins
 tuzminal --list-keys       # the resolved keymap, including plugin bindings
-tuzminal --list-actions    # everything bindable
-tuzminal --list-themes
-tuzminal -v                # debug logging (-vv trace)
 ```
 
-Default keys — all `ctrl+shift`, because plain `ctrl+<key>` belongs to the program
-running inside the terminal:
+### Keys
 
-| Key | Action |
+Press <kbd>F1</kbd> for the full list, generated from your live keymap rather than
+written down — rebind something and the page says what you rebound it to.
+
+| | |
 |---|---|
-| `ctrl+shift+d` / `e` | split right / down |
-| `ctrl+shift+h j k l` or arrows | move focus |
-| `ctrl+shift+w` | close pane |
-| `ctrl+shift+t`, `ctrl+tab` | new tab, next tab |
-| `ctrl+shift+c` / `v` | copy / paste |
-| `ctrl+shift+plus` / `minus` / `0` | font size |
-| `shift+pageup` / `pagedown` | scroll |
-| `ctrl+shift+r` | reload config |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>t</kbd> | new tab |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>d</kbd> / <kbd>e</kbd> | split right / down |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>w</kbd> | close pane |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>hjkl</kbd> or arrows | move between panes |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>c</kbd> / <kbd>v</kbd> | copy / paste |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>b</kbd> | file explorer |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>p</kbd> | plugins |
+| <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>,</kbd> | settings |
+| <kbd>F1</kbd> | all shortcuts |
 
-Config lives at `$XDG_CONFIG_HOME/tuzminal/config.toml`. Every setting is
-optional, and **saving the file applies changes immediately**.
+### The toolbar
 
-```toml
-theme = "tuz-dark"
+`+` opens a tab and the chevron beside it picks which shell. `☰` holds settings,
+shortcuts and plugins. The split buttons and the file explorer have their own
+icons, and the window controls appear only when `decorations = false`, so they are
+never drawn twice.
 
-[font]
-family = "JetBrains Mono"
-size = 13.0
-ligatures = true
+### The file explorer
 
-[window]
-padding = { x = 10, y = 8 }
-opacity = 0.95
-always_show_tab_bar = false   # the bar hides itself with a single tab
+<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>b</kbd> opens a sidebar in the shell's
+current directory. Arrows move, <kbd>enter</kbd> opens a folder or a file in
+`$EDITOR`, <kbd>backspace</kbd> goes up, and <kbd>escape</kbd> hands the keyboard
+back to the shell without closing it.
 
-[keys]
-"ctrl+shift+enter" = "split_right"
-"ctrl+shift+t" = "none"          # remove a default binding
-```
+`p` types the selected path at the prompt, `c` runs `cd`, `e` opens in `$EDITOR`,
+and `r` / `n` / `d` rename, create a folder and delete. Every path written into
+your shell is quoted, so a file called `$(rm -rf ~)` is a filename and not a
+command.
 
-Keybindings **layer over the defaults** rather than replacing them, so adding one
-chord does not cost you the other twenty-two. Bind to `"none"` to remove one.
+---
 
-## Buttons and settings
-
-The tab strip carries a `+` for a new tab, split buttons, a `⚙` for settings, and a
-`×` on the hovered tab only — a permanent close button on every tab is noise, and a
-stray click costs a running shell. Window controls appear only with
-`decorations = false`, since otherwise the compositor already draws a set.
-
-`⚙` or `ctrl+shift+,` opens a settings panel over the terminal. Edits apply **live**,
-because seeing the effect while choosing is the whole advantage over editing TOML, so
-the three exits differ: **Save** writes to `config.toml`, **Revert** restores the
-config as it was when the panel opened, and **Escape** closes while keeping unsaved
-changes for the session. Tab/arrows move a visible focus ring; Enter activates.
-
-Saving preserves your file. Only the keys you changed are rewritten, via `toml_edit`,
-so comments and formatting survive — a plain serialize would produce a valid file and
-delete every comment in it.
-
-## Packages
+## Configuration
 
 ```bash
-tuzminal registry update                    # clone/pull the registry index
-tuzminal plugin search bar
-tuzminal plugin install statusbar           # by registry name
-tuzminal plugin install https://host/u/repo # or straight from git
-tuzminal plugin list | remove <name> | update [name]
-tuzminal theme  install | list | remove | update
+tuzminal --init-config     # write a commented starter config
 ```
 
-Installing a plugin **shows the permissions it asks for and requires
-confirmation** before writing anything, and says plainly when a plugin is not
-sandboxed. A package manager that installed silently would make the permission
-system decorative.
+That creates `~/.config/tuzminal/config.toml`, which is heavily commented and lists
+every option. Saving it applies most changes immediately; anything needing a restart
+says so rather than being silently ignored. Or use the settings page —
+<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>,</kbd> — which writes the same file **and
+keeps your comments**.
+
+## Themes
+
+Ten are built in: `tuz-dark`, `tuz-light`, `catppuccin-mocha`, `dracula`,
+`gruvbox-dark`, `nord`, `one-dark`, `solarized-dark`, `solarized-light` and
+`tokyo-night`.
+
+```bash
+tuzminal theme list
+tuzminal theme install https://host/user/some-theme
+```
+
+Or pick one in the settings page and watch it apply as you scroll.
 
 ## Plugins
 
-**[docs/PLUGINS.md](docs/PLUGINS.md) is the guide**, and
-[`examples/clock`](examples/clock) is a working plugin the test suite loads. Manage
-them from the Plugins page (`ctrl+shift+p`): enable, disable, import a folder, export
-them all.
+**[docs/PLUGINS.md](docs/PLUGINS.md) is the guide.** Two working examples ship in
+[`examples/`](examples) and are installed on first launch, so there is something to
+read and something to toggle straight away.
 
-A plugin is a directory with a `plugin.toml` and an entry file.
+Manage them from the plugins page — <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>p</kbd> —
+which lists what is on disk, enables and disables without a restart, and imports or
+exports through your desktop's folder chooser. Or from the command line:
 
-```toml
-name = "greeter"
-version = "0.1.0"
-api_version = 1
-runtime = "lua"          # or "wasm"
-entry = "init.lua"
-permissions = []         # e.g. ["read-output", { fs-read = "~/notes" }]
+```bash
+tuzminal plugin install https://host/user/repo
+tuzminal plugin list | remove <name> | update [name]
 ```
 
-```lua
-local M = {}
-function M.on_startup(ctx)
-  ctx.register_command("hello", "Say hello")
-  ctx.register_keybind("ctrl+shift+g", "hello")
-end
-function M.on_command(ctx, e)
-  if e.name == "hello" then ctx.send_text("echo hello\n") end
-end
-function M.on_key(ctx, key)
-  if key.chord == "ctrl+shift+q" then return true end  -- claim the key
-end
-return M
-```
+Installing a plugin **shows the permissions it asks for and requires confirmation**
+before writing anything, and says plainly that Lua plugins are not sandboxed.
 
-**The two runtimes are not equally safe, and Tuzminal says so.** WASM permissions
-are structural — an ungranted host function is never linked into the instance, so
-it cannot be called. Lua permissions are a restricted global environment: they
-prevent accidents and document intent, but a determined plugin can get around
-them. Installing a Lua plugin means trusting its code, and both the installer and
-the startup log tell you that.
+---
 
-Every callback runs under a hard budget — an instruction hook for Lua, engine fuel
-for WASM. A plugin that loops forever loses one aborted call, not your terminal,
-and one that keeps failing is disabled.
+## Troubleshooting
+
+**It is not in my applications list.** Run `tuzminal --install-desktop-entry`. Some
+desktops need a log out and back in.
+
+**The launcher does nothing.** The entry points at the binary's absolute path; if
+you moved or reinstalled it, run `--install-desktop-entry` again.
+
+**`tuzminal: command not found`.** `~/.cargo/bin` is not on your `PATH`. Run
+`source ~/.cargo/env`, or add it to your shell profile.
+
+**Blank squares instead of prompt symbols.** Install a Nerd Font and set it in
+`config.toml`. Tuzminal searches every installed font for missing characters, so a
+blank cell means no font on the machine has that glyph.
+
+**It will not start.** `tuzminal --config-check` validates your config, theme,
+keybindings and plugins without opening a window, and reports every problem at once.
+
+**A plugin is misbehaving.** Turn it off on the plugins page, or run with
+`RUST_LOG=debug tuzminal` to see what it is doing. A plugin that fails three calls
+in a row is disabled automatically for the session.
+
+---
 
 ## Design notes
 
@@ -191,16 +253,16 @@ single tab open, and hides those buttons with it.
 
 | Crate | Responsibility | Tests |
 |---|---|---|
-| `tuz-config` | TOML schema, themes, live reload, diffing, saving | 88 |
+| `tuz-config` | TOML schema, themes, live reload, diffing, saving | 86 |
 | `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 84 |
 | `tuz-font` | Discovery, system-wide fallback, shaping, glyph atlas | 42 |
-| `tuz-input` | Keychord grammar, actions, keymap | 39 |
+| `tuz-input` | Keychord grammar, actions, keymap | 38 |
 | `tuz-layout` | BSP split tree, tabs, chrome strips, geometric focus | 88 |
-| `tuz-plugin` | Host, Lua runtime, WASM runtime | 63 |
+| `tuz-plugin` | Host, Lua runtime, WASM runtime | 65 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
-| `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 82 |
+| `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 80 |
 | `tuz-ui` | Widget model, focus order, hit-testing, scrolling | 81 |
-| `tuzminal` | Application, GPU surface, CLI, packages, and the settings, plugins, shortcut and file-explorer pages | 149 |
+| `tuzminal` | Application, GPU surface, CLI, packages, and the settings, plugins, shortcut and file-explorer pages | 175 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
 implementation *and* a cross-platform PTY (openpty on unix, ConPTY on Windows)
@@ -209,22 +271,25 @@ layer and means most of the Windows port already exists.
 
 ## Status
 
-**Working and verified on Linux/Wayland:** shells run; text, colors, bold/italic,
-all five underline styles, strikethrough, CJK, combining marks and true color
-render; splits and tabs with drag-resizable dividers; a tab bar with titles from
-OSC 0/2, an active-tab marker, activity dots and click-to-switch; a status bar fed
-by plugins; mouse selection and clipboard; scrollback; SGR mouse reporting;
-bracketed paste; live config reload; Lua and WASM plugins; the package manager CLI.
+Working: shells, splits, tabs, the file explorer, themes, plugins, the settings,
+shortcuts and plugins pages, mouse selection and clipboard, scrollback, SGR mouse
+reporting, bracketed paste, live config reload, and the package manager.
 
-**Not done:** subpixel antialiasing; IME for CJK input; per-line damage tracking.
-macOS and Windows are built by CI but have never been run on real hardware. macOS and Windows
-compile-target support is in place via the abstractions but **has never been built
-or run** — treat it as unverified.
+Not done, and honestly so:
+
+- **macOS and Windows compile but have never been run.** Treat them as unported.
+- The working directory shown in the status bar and used by the explorer is read
+  from `/proc`, so it is Linux-only. Elsewhere those features degrade rather than
+  fail.
+- No subpixel antialiasing, and no IME, so composed input is not supported.
+- Plugins cannot draw. They can add status segments, bind keys, register commands
+  and drive panes — see [docs/PLUGINS.md](docs/PLUGINS.md) for the boundary and
+  why it is there.
 
 ## Development
 
 ```bash
-cargo test --workspace --features tuz-core/test-util   # 613 tests
+cargo test --workspace --features tuz-core/test-util   # 757 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
 cargo bench --workspace --features tuz-core/test-util   # VT parser throughput

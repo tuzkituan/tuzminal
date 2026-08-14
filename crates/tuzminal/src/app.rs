@@ -97,6 +97,12 @@ const CHROME_PADDING: u32 = 9;
 /// of its own and a borderless window would otherwise be stuck at one size.
 const RESIZE_BORDER: i32 = 6;
 
+/// Wayland app id and X11 `WM_CLASS`.
+///
+/// Must match the basename of the installed `.desktop` file, or the desktop
+/// environment cannot pair the window with its name and icon.
+pub const APP_ID: &str = "tuzminal";
+
 /// How close together two title-bar presses must be to count as a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How far apart they may be, in pixels, and still count. Without some slack a
@@ -3882,6 +3888,20 @@ impl ApplicationHandler<UserEvent> for App {
             // come out black instead.
             .with_transparent(cfg.window.opacity < 1.0 || cfg.window.corner_radius > 0.0)
             .with_inner_size(winit::dpi::LogicalSize::new(width, height));
+
+        // The application id ties the window to `tuzminal.desktop`. Without it the
+        // compositor has no name or icon for us and calls the window "Unknown" — which
+        // is what a GNOME "not responding" dialog was reporting.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            WindowAttributesExtX11::with_name(
+                WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID),
+                APP_ID,
+                APP_ID,
+            )
+        };
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

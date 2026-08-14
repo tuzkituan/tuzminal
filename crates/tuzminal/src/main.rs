@@ -3,6 +3,8 @@
 mod app;
 mod appicon;
 mod bundled;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod desktop;
 mod explorer;
 mod gpu;
 mod help;
@@ -32,6 +34,16 @@ struct Cli {
     /// file.
     #[arg(long)]
     init_config: bool,
+
+    /// Register with the desktop environment so the terminal appears in the
+    /// applications list, then exit.
+    ///
+    /// Freedesktop only. `cargo install` puts a binary on `PATH` and nothing else,
+    /// so without this there is no menu entry and the compositor has no icon for
+    /// the window.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[arg(long)]
+    install_desktop_entry: bool,
 
     /// Validate the config and theme, print any problems, and exit.
     #[arg(long)]
@@ -115,6 +127,27 @@ fn run_item_action(paths: &Paths, kind: pkg::Kind, action: ItemAction) -> Result
     }
 }
 
+/// Write the desktop entry and icon, reporting where they went.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_desktop_entry() -> Result<()> {
+    let data_home = desktop::data_home()
+        .context("could not determine $XDG_DATA_HOME or $HOME")?;
+
+    // The running binary's own path, so an entry installed from a build in one place
+    // does not point at a copy somewhere else.
+    let exec = std::env::current_exe().context("could not determine this executable's path")?;
+
+    let installed = desktop::install(&data_home, &exec)
+        .with_context(|| format!("could not write into {}", data_home.display()))?;
+
+    println!("desktop entry: {}", installed.entry.display());
+    println!("icon:          {}", installed.icon.display());
+    println!("exec:          {}", exec.display());
+    println!();
+    println!("It may take a moment to appear; some desktops need a log out and back in.");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
@@ -133,6 +166,10 @@ fn main() -> Result<()> {
     // Subcommand-ish flags all terminate without opening a window.
     if cli.init_config {
         return init_config(paths);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if cli.install_desktop_entry {
+        return install_desktop_entry();
     }
     if cli.list_actions {
         for name in Action::all_names() {
