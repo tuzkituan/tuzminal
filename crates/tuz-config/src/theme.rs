@@ -100,6 +100,12 @@ pub struct Theme {
     #[serde(default)]
     pub split_divider: Option<Rgba>,
 
+    /// Outline drawn around the window edge. Falls back to a mix of `background`
+    /// and `foreground`, which lands on the right side of either a dark or a light
+    /// theme without the theme having to say so.
+    #[serde(default)]
+    pub window_border: Option<Rgba>,
+
     pub normal: AnsiPalette,
     pub bright: AnsiPalette,
 
@@ -127,6 +133,28 @@ impl Theme {
     }
     pub fn split_divider(&self) -> Rgba {
         self.split_divider.unwrap_or(self.normal.black)
+    }
+
+    /// The window's outline.
+    ///
+    /// A borderless window has no frame from the compositor, so against a wallpaper
+    /// of a similar tone its edge simply is not there. This is that edge.
+    ///
+    /// Derived rather than a fixed grey because the direction has to reverse between
+    /// themes: on a dark theme the edge must be lighter than the window to be seen,
+    /// on a light theme darker. Stepping a fifth of the way from `background` toward
+    /// `foreground` does both, since a theme's foreground is by definition the thing
+    /// that contrasts with its background.
+    pub fn window_border(&self) -> Rgba {
+        self.window_border.unwrap_or_else(|| {
+            let t = 0.2;
+            let step = |bg: u8, fg: u8| (bg as f32 + (fg as f32 - bg as f32) * t).round() as u8;
+            Rgba::rgb(
+                step(self.background.r, self.foreground.r),
+                step(self.background.g, self.foreground.g),
+                step(self.background.b, self.foreground.b),
+            )
+        })
     }
 
     /// Resolve any of the 256 indexed colors.
@@ -370,5 +398,59 @@ mod tests {
     fn available_includes_builtins() {
         let names = Theme::available(&Paths::for_test());
         assert!(names.contains(&DEFAULT_THEME.to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod border_tests {
+    use super::*;
+
+    #[test]
+    fn the_fallback_border_contrasts_with_the_background_either_way() {
+        // The point of deriving it: the step has to go up on a dark theme and down on
+        // a light one, and a fixed grey can only do one of those.
+        let mut dark = Theme::builtin_default();
+        dark.background = Rgba::rgb(0x10, 0x10, 0x10);
+        dark.foreground = Rgba::rgb(0xf0, 0xf0, 0xf0);
+        dark.window_border = None;
+        assert!(dark.window_border().r > dark.background.r);
+
+        let mut light = Theme::builtin_default();
+        light.background = Rgba::rgb(0xf0, 0xf0, 0xf0);
+        light.foreground = Rgba::rgb(0x20, 0x20, 0x20);
+        light.window_border = None;
+        assert!(light.window_border().r < light.background.r);
+    }
+
+    #[test]
+    fn the_fallback_stays_nearer_the_background_than_the_foreground() {
+        // An outline is meant to be noticed and not read. Landing halfway would draw a
+        // frame in the text colour.
+        let mut t = Theme::builtin_default();
+        t.background = Rgba::rgb(0, 0, 0);
+        t.foreground = Rgba::rgb(0xff, 0xff, 0xff);
+        t.window_border = None;
+        let v = t.window_border().r;
+        assert!(v > 0, "invisible against the background");
+        assert!(
+            v < 0x80,
+            "{v} is closer to the foreground than the background"
+        );
+    }
+
+    #[test]
+    fn an_explicit_border_wins_over_the_fallback() {
+        let mut t = Theme::builtin_default();
+        t.window_border = Some(Rgba::rgb(1, 2, 3));
+        assert_eq!(t.window_border(), Rgba::rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn the_fallback_is_opaque() {
+        // Drawn under the background quad, so a translucent outline would show the
+        // cleared surface through the window edge rather than the desktop.
+        let mut t = Theme::builtin_default();
+        t.window_border = None;
+        assert_eq!(t.window_border().a, 0xff);
     }
 }

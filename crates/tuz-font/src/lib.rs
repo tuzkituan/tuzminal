@@ -1296,6 +1296,38 @@ mod tests {
 mod system_fallback_tests {
     use super::*;
 
+    /// Whether any font installed on this machine has a glyph for `c`.
+    ///
+    /// These tests are about the fallback *search*, not about the machine's font
+    /// inventory. A bare CI runner ships almost no fonts, so nothing on it covers a
+    /// powerline codepoint — and a search that correctly finds nothing there is
+    /// indistinguishable from one that is broken. Asserting a hit would test the
+    /// runner's package list rather than this crate.
+    ///
+    /// So a codepoint no installed font carries is skipped, and every codepoint the
+    /// machine does carry is still asserted on. That is what keeps the original bug
+    /// covered: the search looked only at the configured fallback list and ignored
+    /// fonts sitting right there in the database.
+    fn installed_anywhere(sys: &FontSystem, c: char) -> bool {
+        sys.db.faces().any(|info| {
+            sys.db
+                .with_face_data(info.id, |data, index| {
+                    FontRef::from_index(data, index as usize)
+                        .map(|font| font.charmap().map(c) != 0)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// Report a skip, so a silent pass is never mistaken for a real one.
+    fn skip(c: char) {
+        eprintln!(
+            "skipping U+{:04X}: no font installed on this machine has it",
+            c as u32
+        );
+    }
+
     fn system() -> FontSystem {
         FontSystem::new(
             &FontConfig {
@@ -1321,6 +1353,10 @@ mod system_fallback_tests {
 
         // U+E0A0 BRANCH, U+E0B0 SEPARATOR — the two most common powerline glyphs.
         for c in ['\u{e0a0}', '\u{e0b0}'] {
+            if !installed_anywhere(&sys, c) {
+                skip(c);
+                continue;
+            }
             let hit = sys.font_for_char(c, Style::Regular);
             assert!(
                 hit.is_some(),
@@ -1338,6 +1374,10 @@ mod system_fallback_tests {
         // Geometric shapes and box drawing, common in TUI output and unlikely to be
         // in a plain programming font.
         for c in ['◆', '█', '▄', '⑂'] {
+            if !installed_anywhere(&sys, c) {
+                skip(c);
+                continue;
+            }
             assert!(
                 sys.font_for_char(c, Style::Regular).is_some(),
                 "{c:?} (U+{:04X}) should resolve",
@@ -1373,6 +1413,10 @@ mod system_fallback_tests {
     fn every_prompt_symbol_resolves_to_a_real_glyph() {
         let mut sys = system();
         for &c in PROMPT_SYMBOLS {
+            if !installed_anywhere(&sys, c) {
+                skip(c);
+                continue;
+            }
             let hit = sys.font_for_char(c, Style::Regular);
             assert!(
                 hit.is_some(),
@@ -1389,6 +1433,10 @@ mod system_fallback_tests {
         // still leaves a hole in the prompt.
         let mut sys = system();
         for &c in PROMPT_SYMBOLS {
+            if !installed_anywhere(&sys, c) {
+                skip(c);
+                continue;
+            }
             let Some((font, glyph)) = sys.font_for_char(c, Style::Regular) else {
                 panic!("{c:?} should resolve");
             };
@@ -1413,15 +1461,24 @@ mod system_fallback_tests {
         // one that is depends on the installed fonts, so it is discovered rather
         // than hardcoded — an earlier version of this test asserted U+E0A0 and
         // failed because the primary font happened to carry it.
-        let scanned = PROMPT_SYMBOLS.iter().copied().find(|&c| {
+        let candidates: Vec<char> = PROMPT_SYMBOLS
+            .iter()
+            .copied()
+            .filter(|&c| installed_anywhere(&sys, c))
+            .collect();
+        let scanned = candidates.into_iter().find(|&c| {
             sys.font_for_char(c, Style::Regular);
-            sys.system_cache.contains_key(&c)
+            // A hit only counts if the scan actually resolved it. A symbol no font has
+            // is cached as a miss, which still puts the key here — and the assertions
+            // below would then demand a glyph that exists nowhere on the machine.
+            sys.system_cache.get(&c).is_some_and(Option::is_some)
         });
 
         let Some(c) = scanned else {
-            // Every symbol was already covered, so there is nothing to assert about
+            // Either every symbol was already in a loaded face, or this machine has no
+            // font carrying any of them. Neither leaves anything to assert about
             // caching. Say so rather than passing silently.
-            eprintln!("skipping: every prompt symbol is in an already-loaded font");
+            eprintln!("skipping: no prompt symbol needed a system scan on this machine");
             return;
         };
 
@@ -1465,6 +1522,10 @@ mod system_fallback_tests {
     fn a_system_fallback_glyph_can_be_rasterized() {
         // Resolving is only half the job; it has to reach the atlas as pixels.
         let mut sys = system();
+        if !installed_anywhere(&sys, '\u{e0a0}') {
+            skip('\u{e0a0}');
+            return;
+        }
         let Some((font, glyph)) = sys.font_for_char('\u{e0a0}', Style::Regular) else {
             panic!("U+E0A0 should resolve");
         };

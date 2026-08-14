@@ -17,7 +17,7 @@ type Files = &'static [(&'static str, &'static str)];
 /// Every bundled plugin, as `(name, files)`.
 ///
 /// `include_str!` rather than a build script: two small Lua files do not justify one,
-/// and this way the examples in the repository and the ones installed are provably the
+/// and this way the plugins in the repository and the ones installed are provably the
 /// same text.
 const BUNDLED: &[(&str, Files)] = &[
     (
@@ -25,9 +25,9 @@ const BUNDLED: &[(&str, Files)] = &[
         &[
             (
                 "plugin.toml",
-                include_str!("../../../examples/clock/plugin.toml"),
+                include_str!("../../../plugins/clock/plugin.toml"),
             ),
-            ("init.lua", include_str!("../../../examples/clock/init.lua")),
+            ("init.lua", include_str!("../../../plugins/clock/init.lua")),
         ],
     ),
     (
@@ -35,11 +35,11 @@ const BUNDLED: &[(&str, Files)] = &[
         &[
             (
                 "plugin.toml",
-                include_str!("../../../examples/open-in-ide/plugin.toml"),
+                include_str!("../../../plugins/open-in-ide/plugin.toml"),
             ),
             (
                 "init.lua",
-                include_str!("../../../examples/open-in-ide/init.lua"),
+                include_str!("../../../plugins/open-in-ide/init.lua"),
             ),
         ],
     ),
@@ -133,12 +133,12 @@ mod tests {
 
     #[test]
     fn what_is_written_is_what_the_repository_ships() {
-        // The bundled copy and `examples/` must not drift: the guide points readers at
-        // `examples/`, and the tests load from there.
+        // The bundled copy and `plugins/` must not drift: the guide points readers at
+        // `plugins/`, and the tests load from there.
         let tmp = TempDir::new("same");
         install_missing(&tmp.0);
 
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
         for (name, files) in BUNDLED {
             for (file, _) in *files {
                 let installed = std::fs::read_to_string(tmp.0.join(name).join(file)).unwrap();

@@ -405,19 +405,47 @@ pub struct Metrics {
     pub char_width: u32,
 }
 
+/// Everything a panel measures is rounded up to a multiple of this.
+///
+/// The font-size stepper moves in half-point steps, and each one used to change the
+/// cell height by a pixel or two — which changed the row height, the padding and the
+/// heading spacing, so every row below shifted and the control under the pointer moved
+/// out from under it. Adjusting the size two steps meant chasing the stepper down the
+/// page.
+///
+/// Snapping absorbs that. A handful of consecutive steps land on the same grid multiple
+/// and the page does not move at all; only a real change in size moves it, and then by
+/// a whole 8 pixels rather than by an unpredictable few.
+///
+/// Rounding **up** is what keeps this safe. The panel draws its text at the terminal's
+/// font size — there is one glyph size in the atlas — so a row shorter than the text
+/// would clip it. Every snapped metric is therefore at least as large as the unsnapped
+/// one, never smaller.
+const GRID: u32 = 8;
+
+/// Round up to the next multiple of [`GRID`].
+fn snap(value: u32) -> u32 {
+    value.div_ceil(GRID) * GRID
+}
+
 impl Metrics {
     /// Metrics derived from the cell height, so the panel scales with the font
     /// rather than being fixed pixel sizes that look wrong at other sizes.
+    ///
+    /// Scaled but quantised: see [`GRID`] for why the two are not the same thing.
     pub fn from_cell_height(cell_height: u32) -> Self {
         Self {
-            row_height: cell_height + 6,
+            row_height: snap(cell_height + 6),
             row_gap: 2,
-            heading_space: cell_height,
-            padding: cell_height,
-            value_width: cell_height * 12,
+            heading_space: snap(cell_height),
+            padding: snap(cell_height),
+            value_width: snap(cell_height * 12),
             // An estimate. Monospace cells are roughly half as wide as they are tall,
             // and this constructor is only given the height. Prefer `from_cell` where
             // the real width is known.
+            //
+            // Not snapped: it measures text rather than laying out space, and rounding
+            // it up would make every button wider than its label.
             char_width: (cell_height / 2).max(1),
         }
     }
@@ -1693,6 +1721,52 @@ mod tests {
         assert!(large.row_height > small.row_height);
         assert!(large.padding > small.padding);
         assert!(large.value_width > small.value_width);
+    }
+
+    #[test]
+    fn a_small_font_change_moves_nothing() {
+        // The reason `GRID` exists. Half-point steps on the font-size stepper move the
+        // cell height a pixel at a time; unsnapped, each one shifted every row below it
+        // and the stepper walked away from the pointer.
+        let base = Metrics::from_cell_height(24);
+        for cell in 25..=snap(24 + 6) - 6 {
+            let next = Metrics::from_cell_height(cell);
+            assert_eq!(
+                next.row_height, base.row_height,
+                "cell height {cell} changed the row height, so the page moved"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_font_change_still_scales_the_panel() {
+        // The snap must not flatten the scaling altogether: someone at 30pt needs taller
+        // rows than someone at 10pt, or the text does not fit.
+        let small = Metrics::from_cell_height(12);
+        let large = Metrics::from_cell_height(60);
+        assert!(large.row_height >= small.row_height * 3);
+    }
+
+    #[test]
+    fn every_snapped_metric_is_at_least_as_tall_as_the_text_it_holds() {
+        // Rounding down would be the dangerous direction: the panel's text is drawn at
+        // the terminal's font size, so a row shorter than the cell clips it.
+        for cell in 1..200u32 {
+            let m = Metrics::from_cell_height(cell);
+            assert!(
+                m.row_height >= cell,
+                "cell {cell} got a {}px row, which would clip",
+                m.row_height
+            );
+        }
+    }
+
+    #[test]
+    fn snapping_rounds_up_and_leaves_exact_multiples_alone() {
+        assert_eq!(snap(0), 0);
+        assert_eq!(snap(1), GRID);
+        assert_eq!(snap(GRID), GRID);
+        assert_eq!(snap(GRID + 1), GRID * 2);
     }
 }
 

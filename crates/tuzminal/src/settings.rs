@@ -41,6 +41,7 @@ mod ids {
     pub const ALWAYS_TAB_BAR: WidgetId = WidgetId(13);
     pub const DECORATIONS: WidgetId = WidgetId(14);
     pub const CORNER_RADIUS: WidgetId = WidgetId(15);
+    pub const BORDER_WIDTH: WidgetId = WidgetId(19);
     pub const STATUS_BAR: WidgetId = WidgetId(16);
     pub const EXPLORER_WIDTH: WidgetId = WidgetId(17);
     pub const EXPLORER_HIDDEN: WidgetId = WidgetId(18);
@@ -234,6 +235,14 @@ impl SettingsPanel {
                 1.0,
                 0,
             ),
+            Widget::stepper(
+                ids::BORDER_WIDTH,
+                "Border width",
+                config.window.border_width,
+                0.0..=4.0,
+                1.0,
+                0,
+            ),
             Widget::heading("Cursor"),
             Widget::select(
                 ids::CURSOR_SHAPE,
@@ -417,6 +426,7 @@ impl SettingsPanel {
                 ids::PADDING_Y => set(&mut config.window.padding.y, value.round() as u16),
                 ids::OPACITY => set(&mut config.window.opacity, value),
                 ids::CORNER_RADIUS => set(&mut config.window.corner_radius, value),
+                ids::BORDER_WIDTH => set(&mut config.window.border_width, value),
                 ids::EXPLORER_WIDTH => set(&mut config.explorer.width, value.round() as u16),
                 ids::SCROLLBACK => set(&mut config.scrollback.lines, value.round() as u32),
                 ids::SCROLL_MULTIPLIER => set(

@@ -440,17 +440,30 @@ pub fn draw_status_bar(
     placed
 }
 
+/// Gap between a tooltip's label and its keyboard shortcut.
+///
+/// Wide enough that the chord reads as a separate column rather than as more of the
+/// sentence — "New tab ctrl+shift+t" run together is worse than no shortcut at all.
+const TOOLTIP_GAP: f32 = 12.0;
+
 /// Draw a tooltip below a hovered chrome button.
 ///
 /// The strip buttons are bare glyphs. `+` and `×` are self-evident; the split
 /// buttons are not, and a control nobody can identify may as well not be there.
 ///
+/// `shortcut` is the chord bound to the button's action, or `None` for a button with
+/// no binding — the window controls, and the two dropdowns. It is passed in rather
+/// than looked up here because the binding is the user's: rebinding the chord has to
+/// change what the tooltip says, so it comes from the live keymap every frame.
+///
 /// Drawn after the strip and clamped to the window, so a button near the right edge
 /// gets a tooltip that shifts left rather than one that runs off-screen.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_tooltip(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
     button: ChromeButton,
+    shortcut: Option<&str>,
     anchor: Rect,
     window: Rect,
     theme: &Theme,
@@ -458,7 +471,11 @@ pub fn draw_tooltip(
 ) {
     let text = button.describe();
     let metrics = fonts.metrics();
-    let width = text::measure(text, metrics.width as f32) as u32 + (PADDING * 2.0) as u32;
+    let cell = metrics.width as f32;
+
+    let label_width = text::measure(text, cell);
+    let chord_width = shortcut.map_or(0.0, |s| text::measure(s, cell) + TOOLTIP_GAP);
+    let width = (label_width + chord_width) as u32 + (PADDING * 2.0) as u32;
     let height = metrics.height + 6;
 
     // Centred under the button, then pulled inside the window.
@@ -489,17 +506,45 @@ pub fn draw_tooltip(
         colors.convert_opaque(theme.background_focused()),
     ));
 
+    // With a shortcut the label goes left and the chord right, so the two line up as
+    // columns. Without one the label is centred, which is how this has always looked
+    // for the buttons that have no binding.
+    let align = if shortcut.is_some() {
+        Align::Left
+    } else {
+        Align::Center
+    };
     text::draw_in_box(
         out,
         fonts,
         text,
         rect,
         PADDING,
-        Align::Center,
+        align,
         theme.foreground,
         colors,
         Style::Regular,
     );
+
+    if let Some(chord) = shortcut {
+        // Dimmer than the label: the chord is a reminder, not the answer to what the
+        // button does, and at equal weight it competes with the thing it annotates.
+        //
+        // `normal.white` and not `bright.black`, which is the mistake this file has
+        // already made twice — see the tab title and the button icons. Bright black is
+        // the chrome's own grey, so text in it very nearly disappears.
+        text::draw_in_box(
+            out,
+            fonts,
+            chord,
+            rect,
+            PADDING,
+            Align::Right,
+            theme.normal.white,
+            colors,
+            Style::Regular,
+        );
+    }
 }
 
 /// Parse a plugin-supplied color, ignoring anything malformed.
@@ -531,6 +576,144 @@ mod tests {
             srgb: false,
             opacity: 1.0,
         }
+    }
+
+    /// Bounding box of everything a tooltip drew, or `None` if it drew nothing.
+    fn tooltip_bounds(shortcut: Option<&str>, anchor: Rect, window: Rect) -> Option<Rect> {
+        let theme = tuz_config::Theme::builtin_default();
+        let mut out = Vec::new();
+        draw_tooltip(
+            &mut out,
+            &mut fonts(),
+            ChromeButton::NewTab,
+            shortcut,
+            anchor,
+            window,
+            &theme,
+            colors(),
+        );
+        let left = out.iter().map(|i| i.position[0]).reduce(f32::min)?;
+        let top = out.iter().map(|i| i.position[1]).reduce(f32::min)?;
+        let right = out
+            .iter()
+            .map(|i| i.position[0] + i.size[0])
+            .reduce(f32::max)?;
+        let bottom = out
+            .iter()
+            .map(|i| i.position[1] + i.size[1])
+            .reduce(f32::max)?;
+        Some(Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ))
+    }
+
+    #[test]
+    fn a_tooltip_with_a_shortcut_is_wider_than_one_without() {
+        // The chord needs room of its own. Reusing the label-only width would print it
+        // over the label or have the renderer clip it away.
+        let window = Rect::new(0, 0, 1200, 800);
+        let anchor = Rect::new(400, 0, 30, 30);
+        let bare = tooltip_bounds(None, anchor, window).expect("should draw");
+        let with = tooltip_bounds(Some("ctrl+shift+t"), anchor, window).expect("should draw");
+        assert!(
+            with.width > bare.width,
+            "{} is not wider than {}",
+            with.width,
+            bare.width
+        );
+    }
+
+    #[test]
+    fn a_longer_chord_takes_more_room() {
+        // Guards the measurement actually being of the chord: a constant reservation
+        // would pass the test above and then clip a long chord.
+        let window = Rect::new(0, 0, 1200, 800);
+        let anchor = Rect::new(400, 0, 30, 30);
+        let short = tooltip_bounds(Some("f1"), anchor, window).expect("should draw");
+        let long =
+            tooltip_bounds(Some("ctrl+shift+super+alt+f12"), anchor, window).expect("should draw");
+        assert!(long.width > short.width);
+    }
+
+    #[test]
+    fn a_tooltip_with_a_shortcut_still_stays_inside_the_window() {
+        // The extra width is what makes this worth asserting: a button at the right
+        // edge now needs to shift further left than it used to.
+        let window = Rect::new(0, 0, 400, 800);
+        let anchor = Rect::new(380, 0, 20, 30);
+        let bounds =
+            tooltip_bounds(Some("ctrl+shift+super+t"), anchor, window).expect("should draw");
+        assert!(
+            bounds.x >= window.x,
+            "ran off the left edge at x={}",
+            bounds.x
+        );
+        assert!(
+            bounds.right() <= window.right(),
+            "ran off the right edge to {}",
+            bounds.right()
+        );
+    }
+
+    #[test]
+    fn the_label_and_the_chord_do_not_overlap() {
+        // Two `draw_in_box` calls into the same rect, one left-aligned and one right.
+        // Nothing but the reserved gap keeps them apart.
+        let theme = tuz_config::Theme::builtin_default();
+        let mut label_only = Vec::new();
+        draw_tooltip(
+            &mut label_only,
+            &mut fonts(),
+            ChromeButton::NewTab,
+            None,
+            Rect::new(400, 0, 30, 30),
+            Rect::new(0, 0, 1200, 800),
+            &theme,
+            colors(),
+        );
+        let mut both = Vec::new();
+        draw_tooltip(
+            &mut both,
+            &mut fonts(),
+            ChromeButton::NewTab,
+            Some("ctrl+shift+t"),
+            Rect::new(400, 0, 30, 30),
+            Rect::new(0, 0, 1200, 800),
+            &theme,
+            colors(),
+        );
+
+        // Glyph quads are the textured ones; the first two instances are the border and
+        // the fill. The chord's glyphs must all start right of where the label's end.
+        let glyphs = |v: &[Instance]| -> Vec<Instance> {
+            v.iter()
+                .filter(|i| i.flags & crate::instance::FLAG_TEXTURED != 0)
+                .copied()
+                .collect()
+        };
+        let label_glyphs = glyphs(&label_only).len();
+        let all = glyphs(&both);
+        assert!(
+            all.len() > label_glyphs,
+            "the chord drew no glyphs of its own"
+        );
+
+        // Label glyphs come first, chord glyphs after, so the split is by index.
+        let label_end = all[..label_glyphs]
+            .iter()
+            .map(|i| i.position[0] + i.size[0])
+            .fold(f32::MIN, f32::max);
+        let chord_start = all[label_glyphs..]
+            .iter()
+            .map(|i| i.position[0])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            chord_start > label_end,
+            "the chord starts at {chord_start}, which is inside the label ending at {label_end}"
+        );
     }
 
     fn bar() -> Rect {

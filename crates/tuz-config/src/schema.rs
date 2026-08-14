@@ -248,6 +248,13 @@ pub struct Window {
     /// supports transparency: the corners are rounded by making the pixels outside
     /// the curve transparent, so with an opaque surface they would just show black.
     pub corner_radius: f32,
+    /// Width, in pixels, of the outline drawn around the window. `0.0` removes it.
+    ///
+    /// Like the radius, this only applies without decorations — a decorated window
+    /// gets its border from the compositor — and it is dropped when maximized, where
+    /// the window edge is the screen edge and an outline there is just a wasted row
+    /// of pixels.
+    pub border_width: f32,
     /// Initial size in cells.
     pub columns: u16,
     pub rows: u16,
@@ -274,6 +281,7 @@ impl Default for Window {
             opacity: 1.0,
             decorations: false,
             corner_radius: 6.0,
+            border_width: 1.0,
             columns: 100,
             rows: 30,
             title: "Tuzminal".to_owned(),
@@ -428,8 +436,22 @@ pub struct Shell {
     /// Program to launch. `None` uses `$SHELL`, then the platform default.
     pub program: Option<String>,
     pub args: Vec<String>,
-    /// Working directory for new panes. `None` inherits, `"inherit_pane"` uses
-    /// the focused pane's cwd when it can be determined.
+    /// Working directory for new panes.
+    ///
+    /// | value | meaning |
+    /// |---|---|
+    /// | `"inherit_pane"` | the focused pane's directory — a new tab opens where the current one is. **The default.** |
+    /// | `"home"` | `$HOME` |
+    /// | `"inherit_launch"` | whatever directory Tuzminal itself was started in |
+    /// | anything else | that literal path |
+    ///
+    /// `"inherit_pane"` falls back to `"home"` when there is no pane to inherit from,
+    /// which is every first launch. That is why opening the terminal from an app
+    /// launcher lands in the home directory rather than at `/`.
+    ///
+    /// Note that the default is **not** `"inherit_launch"`: running `cd project &&
+    /// tuzminal` opens in `$HOME`, not in `project`. Set `"inherit_launch"` for the
+    /// other behaviour.
     pub working_directory: Option<String>,
     /// Extra environment variables for spawned programs.
     pub env: BTreeMap<String, String>,
@@ -443,7 +465,10 @@ impl Default for Shell {
         Self {
             program: None,
             args: Vec::new(),
-            working_directory: None,
+            // A new tab opening in the directory the last one was in is what makes
+            // tabs usable for moving around a project; the alternative is retyping
+            // the same `cd` in every one.
+            working_directory: Some("inherit_pane".to_owned()),
             env: BTreeMap::new(),
             term: "xterm-256color".to_owned(),
         }
@@ -740,6 +765,7 @@ impl Config {
 
         // Purely visual window properties.
         if self.window.opacity != new.window.opacity
+            || self.window.border_width != new.window.border_width
             || self.window.decorations != new.window.decorations
             || self.window.title != new.window.title
             || self.window.dynamic_title != new.window.dynamic_title

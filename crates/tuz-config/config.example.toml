@@ -148,7 +148,16 @@ scroll_to_bottom_on_input = true
 # program = "/usr/bin/fish"
 # args = ["--login"]
 
-# Set to "inherit_pane" to open new panes in the focused pane's directory.
+# Where a new pane starts. The default, "inherit_pane", opens it in the focused
+# pane's directory, falling back to your home directory when there is no pane to
+# inherit from — which is every first launch.
+#
+#   "inherit_pane"    the focused pane's directory (default)
+#   "home"            your home directory
+#   "inherit_launch"  wherever tuzminal itself was started, so `cd project &&
+#                     tuzminal` opens in project
+#   "/any/path"       that directory
+#
 # working_directory = "inherit_pane"
 
 # "xterm-256color" is understood everywhere, including over ssh to hosts that

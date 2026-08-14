@@ -500,14 +500,36 @@ impl Drop for Session {
 }
 
 /// Resolve the working directory for a new session.
+///
+/// `None` means "whatever this process's cwd is", which the pty inherits.
 fn working_directory(cfg: &Config) -> Option<std::path::PathBuf> {
     match cfg.shell.working_directory.as_deref() {
-        // `inherit_pane` is handled by the caller, which knows the focused pane's
-        // cwd; treating it as a literal path here would try to `cd` into a
-        // directory named "inherit_pane".
-        None | Some("inherit_pane") => None,
+        Some("inherit_launch") | None => None,
+
+        // The caller resolves `inherit_pane` to the focused pane's directory and
+        // rewrites this field before spawning, because only it knows which pane has
+        // focus. Reaching here means there was nothing to inherit from — a first
+        // launch — and home is a better answer than the directory the binary happened
+        // to be started in. Treating the word as a literal path would try to `cd` into
+        // a directory called "inherit_pane".
+        Some("inherit_pane") | Some("home") => home_directory(),
+
         Some(path) => Some(std::path::PathBuf::from(path)),
     }
+}
+
+/// The user's home directory, or `None` if the environment does not say.
+fn home_directory() -> Option<std::path::PathBuf> {
+    // `USERPROFILE` as well as `HOME`: the pty layer builds on Windows too, and this
+    // returning `None` there would silently fall back to the launch directory.
+    for var in ["HOME", "USERPROFILE"] {
+        if let Some(dir) = std::env::var_os(var) {
+            if !dir.is_empty() {
+                return Some(std::path::PathBuf::from(dir));
+            }
+        }
+    }
+    None
 }
 
 /// Environment for the child process.
@@ -629,15 +651,71 @@ mod tests {
 
     #[test]
     fn inherit_pane_is_not_treated_as_a_literal_path() {
+        // Left as a literal, the pty would try to `cd` into a directory named
+        // "inherit_pane" and the shell would fail to start.
         let mut cfg = Config::default();
         cfg.shell.working_directory = Some("inherit_pane".to_owned());
-        assert_eq!(working_directory(&cfg), None);
+        assert_ne!(
+            working_directory(&cfg),
+            Some(std::path::PathBuf::from("inherit_pane"))
+        );
 
         cfg.shell.working_directory = Some("/tmp".to_owned());
         assert_eq!(
             working_directory(&cfg),
             Some(std::path::PathBuf::from("/tmp"))
         );
+    }
+
+    #[test]
+    fn an_unresolved_inherit_pane_falls_back_to_home() {
+        // The first pane has no predecessor to inherit from, so this is the path every
+        // launch takes. Landing in `$HOME` is the point of the feature: a terminal
+        // started from an app launcher inherits that process's cwd, which is `/`.
+        let mut cfg = Config::default();
+        cfg.shell.working_directory = Some("inherit_pane".to_owned());
+        assert_eq!(working_directory(&cfg), home_directory());
+        assert_eq!(
+            working_directory(&cfg),
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+            "on this platform home comes from $HOME"
+        );
+    }
+
+    #[test]
+    fn home_is_the_default_because_inherit_pane_is() {
+        // The default config must produce the home directory rather than the launch
+        // directory, or every first launch opens wherever the binary was run from.
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.shell.working_directory.as_deref(),
+            Some("inherit_pane"),
+            "the default changed; the launch directory is no longer what a new pane gets"
+        );
+        assert_eq!(working_directory(&cfg), home_directory());
+    }
+
+    #[test]
+    fn inherit_launch_is_how_you_ask_for_the_old_behaviour() {
+        // `None` from the pty layer means "inherit this process's cwd". Someone running
+        // `cd project && tuzminal` and wanting `project` needs a way to say so.
+        let mut cfg = Config::default();
+        cfg.shell.working_directory = Some("inherit_launch".to_owned());
+        assert_eq!(working_directory(&cfg), None);
+
+        cfg.shell.working_directory = None;
+        assert_eq!(
+            working_directory(&cfg),
+            None,
+            "an absent value means the same"
+        );
+    }
+
+    #[test]
+    fn home_can_be_asked_for_explicitly() {
+        let mut cfg = Config::default();
+        cfg.shell.working_directory = Some("home".to_owned());
+        assert_eq!(working_directory(&cfg), home_directory());
     }
 
     #[test]

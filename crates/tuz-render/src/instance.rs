@@ -28,6 +28,13 @@ pub const FLAG_ROUND_BR: u32 = 32;
 pub const FLAG_ROUND_TOP: u32 = FLAG_ROUND_TL | FLAG_ROUND_TR;
 /// Both bottom corners.
 pub const FLAG_ROUND_BOTTOM: u32 = FLAG_ROUND_BL | FLAG_ROUND_BR;
+/// Draw only a band of `stroke_width` inside the edge, leaving the middle untouched.
+///
+/// A filled quad cannot be an outline drawn last, and an outline has to be drawn last
+/// to sit on top of the chrome that reaches the window edge. Four edge rectangles
+/// would leave the corners bare, so the band is cut out of the distance field instead
+/// and follows the curve for free.
+pub const FLAG_RING: u32 = 64;
 
 /// One quad. Field order and padding must match `cell.wgsl`.
 #[repr(C)]
@@ -52,8 +59,11 @@ pub struct Instance {
     /// without it there is no way to draw the diagonal strokes of a close cross or
     /// the teeth of a gear out of axis-aligned quads.
     pub rotation: f32,
-    /// Explicit padding to a 16-byte boundary, required by the vertex layout.
-    pub _padding: [u32; 1],
+    /// Width of the band drawn by [`FLAG_RING`], in pixels. Ignored without it.
+    ///
+    /// Sits in what was explicit padding, so the instance is still 64 bytes and the
+    /// vertex stride did not move.
+    pub stroke_width: f32,
 }
 
 impl Instance {
@@ -67,7 +77,7 @@ impl Instance {
             flags: 0,
             corner_radius: 0.0,
             rotation: 0.0,
-            _padding: [0; 1],
+            stroke_width: 0.0,
         }
     }
 
@@ -89,7 +99,7 @@ impl Instance {
             flags: FLAG_TEXTURED | if color_glyph { FLAG_COLOR_GLYPH } else { 0 },
             corner_radius: 0.0,
             rotation: 0.0,
-            _padding: [0; 1],
+            stroke_width: 0.0,
         }
     }
 
@@ -116,8 +126,31 @@ impl Instance {
             // the shape inverts.
             corner_radius: radius.min(width.min(height) / 2.0).max(0.0),
             rotation: 0.0,
-            _padding: [0; 1],
+            stroke_width: 0.0,
         }
+    }
+
+    /// An outline: a band `stroke` wide just inside the edge, hollow in the middle.
+    ///
+    /// Drawn from the same distance field as [`Instance::rounded`], so the band follows
+    /// the corner curve rather than stopping short of it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [f32; 4],
+        radius: f32,
+        corners: u32,
+        stroke: f32,
+    ) -> Self {
+        let mut instance = Self::rounded(x, y, width, height, color, radius, corners);
+        instance.flags |= FLAG_RING;
+        // Half the shorter side is the point at which the band meets itself and the
+        // ring is a filled quad; past that the inner edge would invert.
+        instance.stroke_width = stroke.clamp(0.0, width.min(height) / 2.0);
+        instance
     }
 
     /// A solid rectangle turned about its own center.
@@ -130,7 +163,7 @@ impl Instance {
             flags: 0,
             corner_radius: 0.0,
             rotation: radians,
-            _padding: [0; 1],
+            stroke_width: 0.0,
         }
     }
 
@@ -150,7 +183,7 @@ impl Instance {
 
     /// The vertex buffer layout matching this struct.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
             0 => Float32x2, // position
             1 => Float32x2, // size
             2 => Float32x4, // uv
@@ -158,6 +191,7 @@ impl Instance {
             4 => Uint32,    // flags
             5 => Float32,   // corner_radius
             6 => Float32,   // rotation
+            7 => Float32,   // stroke_width
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,

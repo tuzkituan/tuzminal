@@ -38,7 +38,7 @@ cp target/release/tuzminal "${STAGE}/tuzminal"
 cp README.md LICENSE-MIT LICENSE-APACHE "${STAGE}/"
 cp docs/PLUGINS.md "${STAGE}/share/"
 cp assets/tuzminal.svg "${STAGE}/share/"
-cp -r examples "${STAGE}/share/examples"
+cp -r plugins "${STAGE}/share/plugins"
 
 # The installer is generated rather than kept as a file: it has to agree with the
 # layout above, and two copies of that knowledge would drift.

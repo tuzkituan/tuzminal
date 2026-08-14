@@ -384,7 +384,7 @@ mod tests {
         let layout = Instance::layout();
         assert_eq!(layout.array_stride, std::mem::size_of::<Instance>() as u64);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
-        assert_eq!(layout.attributes.len(), 7);
+        assert_eq!(layout.attributes.len(), 8);
     }
 
     #[test]
@@ -393,6 +393,9 @@ mod tests {
         // is garbled geometry rather than an error.
         let layout = Instance::layout();
         let offsets: Vec<u64> = layout.attributes.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 8, 16, 32, 48, 52, 56]);
+        assert_eq!(offsets, vec![0, 8, 16, 32, 48, 52, 56, 60]);
+        // 64 bytes, unchanged: `stroke_width` went into what was explicit padding, so
+        // adding an outline primitive cost nothing per instance.
+        assert_eq!(std::mem::size_of::<Instance>(), 64);
     }
 }

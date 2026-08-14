@@ -996,3 +996,97 @@ fn the_settings_panel_draws_over_a_dimmed_terminal() {
     let lit = non_background(&pixels, theme.background);
     assert!(lit > 100, "expected panel text, only {lit} lit pixels");
 }
+
+#[test]
+fn the_window_border_is_a_hollow_ring_drawn_over_what_is_beneath_it() {
+    let Some(h) = Harness::new() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let mut renderer = Renderer::new(&h.device, FORMAT, fonts().atlas());
+
+    const STROKE: f32 = 3.0;
+    let green = [0.0, 1.0, 0.0, 1.0];
+    let red = [1.0, 0.0, 0.0, 1.0];
+
+    // A filled quad standing in for the tab strip and the panes, then the border over
+    // the top of it. This is the ordering the app uses, and the reason it does: the
+    // strip reaches the window edge, so a border drawn first is buried by it.
+    let instances = [
+        Instance::solid(0.0, 0.0, WIDTH as f32, HEIGHT as f32, green),
+        Instance::ring(0.0, 0.0, WIDTH as f32, HEIGHT as f32, red, 0.0, 0, STROKE),
+    ];
+    let pixels = h.render(&mut renderer, &instances, Rgba::BLACK);
+
+    // The band, on all four edges.
+    for (x, y, edge) in [
+        (WIDTH / 2, 0, "top"),
+        (WIDTH / 2, HEIGHT - 1, "bottom"),
+        (0, HEIGHT / 2, "left"),
+        (WIDTH - 1, HEIGHT / 2, "right"),
+    ] {
+        assert_eq!(
+            pixel(&pixels, x, y),
+            [255, 0, 0, 255],
+            "the {edge} edge should be the border colour, not what was under it"
+        );
+    }
+
+    // Hollow: what was beneath survives everywhere the band is not. The failure this
+    // catches is a filled quad drawn last, which would hide the entire window.
+    assert_eq!(
+        pixel(&pixels, WIDTH / 2, HEIGHT / 2),
+        [0, 255, 0, 255],
+        "the middle should be untouched"
+    );
+
+    // Just inside the band is already through it. Sampled a pixel clear of the
+    // antialiased inner edge rather than immediately at STROKE.
+    assert_eq!(
+        pixel(&pixels, WIDTH / 2, STROKE as u32 + 1),
+        [0, 255, 0, 255],
+        "the band is wider than it was asked to be"
+    );
+}
+
+#[test]
+fn a_rounded_border_leaves_the_window_corner_transparent() {
+    let Some(h) = Harness::new() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let mut renderer = Renderer::new(&h.device, FORMAT, fonts().atlas());
+
+    const RADIUS: f32 = 12.0;
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let corners = tuz_render::instance::FLAG_ROUND_TOP | tuz_render::instance::FLAG_ROUND_BOTTOM;
+    let instances = [Instance::ring(
+        0.0,
+        0.0,
+        WIDTH as f32,
+        HEIGHT as f32,
+        red,
+        RADIUS,
+        corners,
+        2.0,
+    )];
+    let pixels = h.render(&mut renderer, &instances, Rgba::TRANSPARENT);
+
+    // Outside the curve is untouched, so the compositor still shows the desktop there
+    // — the border must not square off the corners the window spent effort rounding.
+    assert_eq!(
+        pixel(&pixels, 0, 0)[3],
+        0,
+        "the corner outside the radius should stay clear"
+    );
+
+    // And the curve itself is drawn: on the diagonal, at the arc's own center, the
+    // band has to be there or the corners are simply missing from the outline.
+    let arc = RADIUS - RADIUS * std::f32::consts::FRAC_1_SQRT_2;
+    let probe = arc.round() as u32;
+    let alpha = pixel(&pixels, probe, probe)[3];
+    assert!(
+        alpha > 0,
+        "nothing drawn at ({probe}, {probe}), so the outline stops short of the curve"
+    );
+}

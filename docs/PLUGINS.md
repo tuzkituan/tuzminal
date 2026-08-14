@@ -5,7 +5,7 @@ segments, bind keys, register commands, drive panes and tabs, and type into your
 shell. It cannot draw — see [What plugins cannot do](#what-plugins-cannot-do), which
 is a deliberate boundary rather than a gap.
 
-Two working examples ship in [`examples/`](../examples): `clock`, a tour of the API in
+Two working plugins ship in [`plugins/`](../plugins): `clock`, a tour of the API in
 forty lines, and `open-in-ide`, which was a built-in feature until it became a plugin.
 Both are loaded by the test suite, so they are known to work against the current API
 rather than being snippets that rotted.

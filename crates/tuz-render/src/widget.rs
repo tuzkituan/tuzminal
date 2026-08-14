@@ -48,7 +48,7 @@ pub fn draw_panel_frame(
         flags: 0,
         corner_radius: 0.0,
         rotation: 0.0,
-        _padding: [0; 1],
+        stroke_width: 0.0,
     });
 
     // Border first, then the interior inset by the border width, which draws an
@@ -1382,7 +1382,10 @@ mod tests {
             "Settings",
             &theme,
             colors(),
-            20.0,
+            // Derived, not the literal cell height. Those were the same number until the
+            // panel metrics were snapped to a grid, and the point of this test is that
+            // the title tracks `Metrics::padding` wherever that lands.
+            tuz_ui::Metrics::from_cell_height(20).padding as f32,
         );
         let title_x = out
             .iter()

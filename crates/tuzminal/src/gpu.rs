@@ -130,10 +130,13 @@ impl Gpu {
             pick_alpha_mode(&caps.alpha_modes, want_transparency);
         config.alpha_mode = alpha_mode;
         config.present_mode = pick_present_mode(&caps.present_modes, cfg.performance.vsync);
-        // One frame in flight instead of the default two. A terminal renders a frame
-        // in well under a millisecond, so the extra buffering buys no smoothness and
-        // costs a frame of latency on every keystroke and every resize step — which
-        // is exactly the lag you feel dragging a window edge.
+        // One frame in flight instead of the default two, trading throughput for
+        // latency: a keystroke is the thing a terminal is judged on, and the second
+        // buffer costs a frame of it.
+        //
+        // Not a fix for slow resizing, which is what an earlier version of this comment
+        // claimed. That was reflow of the scrollback happening once per resize event,
+        // and it is dealt with where the events are handled.
         config.desired_maximum_frame_latency = 1;
 
         log::debug!(

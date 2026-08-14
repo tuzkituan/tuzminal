@@ -24,6 +24,7 @@ const FLAG_ROUND_TR: u32 = 8u;
 const FLAG_ROUND_BL: u32 = 16u;
 const FLAG_ROUND_BR: u32 = 32u;
 const FLAG_ROUND_ANY: u32 = 60u;
+const FLAG_RING: u32 = 64u;
 
 struct Instance {
     @location(0) position: vec2<f32>,
@@ -33,6 +34,7 @@ struct Instance {
     @location(4) flags: u32,
     @location(5) corner_radius: f32,
     @location(6) rotation: f32,
+    @location(7) stroke_width: f32,
 };
 
 struct VertexOutput {
@@ -44,6 +46,7 @@ struct VertexOutput {
     @location(3) local: vec2<f32>,
     @location(4) @interpolate(flat) quad_size: vec2<f32>,
     @location(5) @interpolate(flat) corner_radius: f32,
+    @location(6) @interpolate(flat) stroke_width: f32,
 };
 
 // Unit-quad corner for a vertex index, as two triangles.
@@ -93,6 +96,7 @@ fn vs_main(
     out.local = unit * instance.size;
     out.quad_size = instance.size;
     out.corner_radius = instance.corner_radius;
+    out.stroke_width = instance.stroke_width;
     return out;
 }
 
@@ -119,20 +123,48 @@ fn rounded_coverage(local: vec2<f32>, size: vec2<f32>, radius: f32, flags: u32) 
     if (flags & bit) == 0u {
         return 1.0;
     }
-    let r = radius;
+    // One pixel of smoothing, so the curve is not a staircase.
+    return 1.0 - smoothstep(-0.5, 0.5, rounded_distance(local, size, radius));
+}
 
-    // Standard rounded-box signed distance: distance from the inner rect inset by r.
+/// Signed distance to a rounded rectangle's edge: negative inside, positive outside.
+fn rounded_distance(local: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
     let half = size * 0.5;
     let p = local - half;
-    let q = abs(p) - (half - vec2<f32>(r, r));
-    let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let q = abs(p) - (half - vec2<f32>(radius, radius));
+    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
 
-    // One pixel of smoothing, so the curve is not a staircase.
-    return 1.0 - smoothstep(-0.5, 0.5, d);
+/// Coverage of a band `stroke` wide lying just inside the edge.
+///
+/// Written separately from `rounded_coverage` rather than sharing its per-corner
+/// early-out: that returns full coverage for a corner the flags leave square, which is
+/// right for a fill and would punch a hole in a ring.
+fn ring_coverage(local: vec2<f32>, size: vec2<f32>, radius: f32, stroke: f32) -> f32 {
+    if stroke <= 0.0 {
+        return 0.0;
+    }
+    let d = rounded_distance(local, size, radius);
+    // The band is where the distance falls between -stroke and 0. Folding it about its
+    // own middle turns that interval into one more distance field, so the inner and
+    // outer edges are both antialiased by the same smoothstep.
+    let band = abs(d + stroke * 0.5) - stroke * 0.5;
+    return 1.0 - smoothstep(-0.5, 0.5, band);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (in.flags & FLAG_RING) != 0u {
+        // An outline, hollow in the middle. Discarding rather than blending zero alpha
+        // matters here: a ring is drawn last, over finished pixels, and it must leave
+        // everything but its own band exactly as it found it.
+        let ring = ring_coverage(in.local, in.quad_size, in.corner_radius, in.stroke_width);
+        if ring <= 0.0 {
+            discard;
+        }
+        return vec4<f32>(in.color.rgb, in.color.a * ring);
+    }
+
     let coverage = rounded_coverage(in.local, in.quad_size, in.corner_radius, in.flags);
     if coverage <= 0.0 {
         discard;

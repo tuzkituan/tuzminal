@@ -53,11 +53,19 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      # Tests that need a font are skipped rather than failed on a runner without
-      # one; the font-dependent suites say so in their panic message.
-      - name: Install a font for the font tests
+      # The fallback tests assert that a symbol resolves through a scan of the installed
+      # fonts. With only `fonts-dejavu-core` most of the symbols they cover are on no
+      # font on the machine, so each one was skipped or — before the skips existed —
+      # failed, which measured this runner's package list rather than the search.
+      #
+      # Noto covers the geometric shapes, arrows and box drawing the prompt tests use.
+      # Powerline codepoints live in the Private Use Area and are in no packaged font,
+      # so those stay skipped here and are covered on a developer machine.
+      - name: Install fonts for the font tests
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            fonts-dejavu-core fonts-noto-core
 
       - name: Test
         # The GPU tests skip themselves when no adapter is available, which is the

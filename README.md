@@ -175,8 +175,8 @@ Or pick one in the settings page and watch it apply as you scroll.
 
 ## Plugins
 
-**[docs/PLUGINS.md](docs/PLUGINS.md) is the guide.** Two working examples ship in
-[`examples/`](examples) and are installed on first launch, so there is something to
+**[docs/PLUGINS.md](docs/PLUGINS.md) is the guide.** Two working plugins ship in
+[`plugins/`](plugins) and are installed on first launch, so there is something to
 read and something to toggle straight away.
 
 Manage them from the plugins page — <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>p</kbd> —

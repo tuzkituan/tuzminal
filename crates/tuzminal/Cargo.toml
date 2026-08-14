@@ -45,7 +45,7 @@ assets = [
     ["../../assets/tuzminal.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["../../README.md", "usr/share/doc/tuzminal/", "644"],
     ["../../docs/PLUGINS.md", "usr/share/doc/tuzminal/", "644"],
-    ["../../examples/**/*", "usr/share/doc/tuzminal/examples/", "644"],
+    ["../../plugins/**/*", "usr/share/doc/tuzminal/plugins/", "644"],
 ]
 
 [package.metadata.generate-rpm]

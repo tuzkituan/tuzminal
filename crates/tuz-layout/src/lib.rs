@@ -144,6 +144,26 @@ pub enum ChromeButton {
 }
 
 impl ChromeButton {
+    /// Every button, for exhaustive iteration in tests and in callers that must handle
+    /// all of them.
+    ///
+    /// Hand-written, so adding a variant without adding it here is a bug this array
+    /// cannot catch — the length assertion in the test below is what does.
+    pub const ALL: [ChromeButton; 12] = [
+        ChromeButton::NewTab,
+        ChromeButton::NewTabMenu,
+        ChromeButton::AppMenu,
+        ChromeButton::Plugins,
+        ChromeButton::Explorer,
+        ChromeButton::Help,
+        ChromeButton::Settings,
+        ChromeButton::SplitRight,
+        ChromeButton::SplitDown,
+        ChromeButton::Minimize,
+        ChromeButton::Maximize,
+        ChromeButton::Close,
+    ];
+
     /// Whether this button belongs immediately after the last tab rather than in
     /// the group packed against the right edge.
     ///
@@ -1651,5 +1671,49 @@ mod reorder_tests {
         before.sort();
         assert_eq!(after, before);
         assert_eq!(layout.tab_count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod chrome_button_tests {
+    use super::*;
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // `ALL` is hand-written, and the compiler will not notice a variant left out of
+        // it. This is what notices: match on each entry so a new variant makes the match
+        // non-exhaustive, and check for duplicates so a copy-paste cannot pad the count.
+        for button in ChromeButton::ALL {
+            match button {
+                ChromeButton::NewTab
+                | ChromeButton::NewTabMenu
+                | ChromeButton::AppMenu
+                | ChromeButton::Plugins
+                | ChromeButton::Explorer
+                | ChromeButton::Help
+                | ChromeButton::Settings
+                | ChromeButton::SplitRight
+                | ChromeButton::SplitDown
+                | ChromeButton::Minimize
+                | ChromeButton::Maximize
+                | ChromeButton::Close => {}
+            }
+        }
+        for (i, a) in ChromeButton::ALL.iter().enumerate() {
+            for b in &ChromeButton::ALL[i + 1..] {
+                assert_ne!(a, b, "{a:?} appears twice in ALL");
+            }
+        }
+    }
+
+    #[test]
+    fn every_button_has_a_glyph_and_a_description() {
+        for button in ChromeButton::ALL {
+            assert!(
+                !button.describe().is_empty(),
+                "{button:?} has no description"
+            );
+            assert_ne!(button.glyph(), '\0', "{button:?} has no glyph");
+        }
     }
 }

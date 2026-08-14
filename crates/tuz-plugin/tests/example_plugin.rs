@@ -1,4 +1,4 @@
-//! Loads the example plugin that ships in `examples/`.
+//! Loads the plugins that ship in `plugins/`.
 //!
 //! The plugin API had unit tests and no users: nothing in the repository had ever
 //! been loaded end to end, which is how an extension API stays green while quietly
@@ -10,17 +10,17 @@ use std::path::PathBuf;
 use tuz_plugin::Host;
 use tuz_plugin_api::Event;
 
-fn examples_dir() -> PathBuf {
+fn plugins_dir() -> PathBuf {
     // `CARGO_MANIFEST_DIR` is `crates/tuz-plugin`.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples")
+        .join("../../plugins")
         .canonicalize()
-        .expect("the examples directory should exist")
+        .expect("the plugins directory should exist")
 }
 
 #[test]
 fn the_shipped_example_is_discovered_and_loads() {
-    let dirs = vec![examples_dir()];
+    let dirs = vec![plugins_dir()];
 
     let found = tuz_plugin::discover(&dirs);
     let names: Vec<String> = found
@@ -43,7 +43,7 @@ fn the_example_registers_its_command_and_keybind_at_startup() {
     // `load_all` dispatches `Startup` and applies the registrations, so by the time
     // it returns the binding must already exist — the keymap is built right after.
     let mut host = Host::disabled();
-    host.load_all(&[examples_dir()], &tuz_config::Plugins::default());
+    host.load_all(&[plugins_dir()], &tuz_config::Plugins::default());
 
     let binds = host.keybinds();
     assert_eq!(
@@ -57,7 +57,7 @@ fn the_example_registers_its_command_and_keybind_at_startup() {
 #[test]
 fn the_example_produces_a_status_segment() {
     let mut host = Host::disabled();
-    host.load_all(&[examples_dir()], &tuz_config::Plugins::default());
+    host.load_all(&[plugins_dir()], &tuz_config::Plugins::default());
 
     host.dispatch(&Event::StatusBarRender);
     let segments = host.status_segments();
@@ -76,7 +76,7 @@ fn the_example_produces_a_status_segment() {
 #[test]
 fn a_clickable_segment_reaches_the_plugin_that_published_it() {
     let mut host = Host::disabled();
-    host.load_all(&[examples_dir()], &tuz_config::Plugins::default());
+    host.load_all(&[plugins_dir()], &tuz_config::Plugins::default());
     host.dispatch(&Event::StatusBarRender);
 
     // The clock's segment carries no id and must not be clickable; the editor
@@ -109,7 +109,7 @@ fn a_clickable_segment_reaches_the_plugin_that_published_it() {
 #[test]
 fn the_example_sends_text_when_its_command_runs() {
     let mut host = Host::disabled();
-    host.load_all(&[examples_dir()], &tuz_config::Plugins::default());
+    host.load_all(&[plugins_dir()], &tuz_config::Plugins::default());
 
     let commands = host.dispatch(&Event::Command {
         name: "hello".to_owned(),

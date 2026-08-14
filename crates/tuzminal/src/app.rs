@@ -42,6 +42,7 @@ use tuz_ui::{UiKey, Widget};
 
 use crate::settings::{PanelOutcome, SettingsPanel};
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
@@ -101,6 +102,10 @@ const RESIZE_BORDER: i32 = 6;
 ///
 /// Must match the basename of the installed `.desktop` file, or the desktop
 /// environment cannot pair the window with its name and icon.
+///
+/// Gated to the platforms that have such a thing, alongside `crate::desktop`: nothing
+/// on macOS or Windows reads it, and an unused constant is an error under `-D warnings`.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const APP_ID: &str = "tuzminal";
 
 /// How close together two title-bar presses must be to count as a double-click.
@@ -156,6 +161,15 @@ pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
 
+    /// The newest size the compositor has asked for, not yet acted on.
+    ///
+    /// Dragging a window edge produces a stream of `Resized` events — far more of them
+    /// per second than the display can show frames. Only the last one in a batch
+    /// describes the size the window actually has, so the rest are recorded here and
+    /// thrown away, and the work they would each have cost happens once per frame
+    /// instead. See the `Resized` arm.
+    pending_size: Option<PhysicalSize<u32>>,
+
     /// Channel PTY threads report on, plus the sender handed to new sessions.
     events_tx: crossbeam_channel::Sender<PaneEvent>,
     events_rx: crossbeam_channel::Receiver<PaneEvent>,
@@ -198,6 +212,13 @@ pub struct App {
     /// `ensure_session` that immediately follows setting it, and storing it per pane
     /// would imply a pane could be respawned with it, which nothing does.
     pending_shell: Option<String>,
+    /// Directory the next spawned pane should start in, for one spawn only.
+    ///
+    /// Captured before the new pane takes focus, which is the whole reason it exists:
+    /// by the time `ensure_session` runs, the active pane *is* the new one and it has no
+    /// shell to ask. Same shape as `pending_shell` above — an exception to the config
+    /// for one spawn, rather than a second parameter on `Session::spawn`.
+    pending_cwd: Option<std::path::PathBuf>,
     /// The open dropdown, if any.
     menu: Option<crate::menu::Menu>,
     /// Where it was drawn last frame, for hit-testing what is on screen.
@@ -355,6 +376,8 @@ impl App {
             resize_cursor: None,
             cwd: crate::status::CwdCache::default(),
             pending_shell: None,
+            pending_cwd: None,
+            pending_size: None,
             menu: None,
             menu_rect: None,
             help: None,
@@ -505,6 +528,22 @@ impl App {
         }
     }
 
+    /// Width of the window outline, or zero where one should not be drawn.
+    ///
+    /// Suppressed in three cases. With decorations the compositor draws the frame and
+    /// a second border inside it reads as a mistake. Maximized, the window edge is the
+    /// screen edge, so the outline would only eat a row of pixels at each side. And it
+    /// is clamped to a quarter of the smaller dimension, because a border wide enough
+    /// to meet itself in the middle would paint the whole window in the outline color
+    /// — which is what a negative inset would produce.
+    fn border_width(cfg: &tuz_config::Config, maximized: bool, (width, height): (u32, u32)) -> f32 {
+        if cfg.window.decorations || maximized {
+            return 0.0;
+        }
+        let limit = width.min(height) as f32 / 4.0;
+        cfg.window.border_width.clamp(0.0, limit)
+    }
+
     /// Toolbar buttons whose panel is on screen right now.
     ///
     /// A toggle that looks identical whether its panel is open or shut leaves the
@@ -620,14 +659,19 @@ impl App {
         // A menu choice overrides the configured program for this one spawn. Cloning
         // the config is a spawn-time cost, and it keeps `Session::spawn` taking one
         // config rather than a config plus an exception to it.
-        let config = match &self.pending_shell {
-            None => self.settings.config().clone(),
-            Some(program) => {
-                let mut cfg = self.settings.config().clone();
-                cfg.shell.program = Some(program.clone());
-                cfg
+        let mut config = self.settings.config().clone();
+        if let Some(program) = &self.pending_shell {
+            config.shell.program = Some(program.clone());
+        }
+        // `inherit_pane` can only be resolved here: `tuz-core` has no idea which pane
+        // has focus, and by now the answer has already been captured into `pending_cwd`
+        // by whoever created the pane. Left unresolved it falls back to the home
+        // directory, which is what the very first pane gets.
+        if config.shell.working_directory.as_deref() == Some("inherit_pane") {
+            if let Some(cwd) = self.pending_cwd.as_ref() {
+                config.shell.working_directory = Some(cwd.display().to_string());
             }
-        };
+        }
 
         match Session::spawn(
             pane,
@@ -675,7 +719,36 @@ impl App {
         }
     }
 
+    /// Act on the most recent size the compositor asked for, if it has moved.
+    ///
+    /// The expensive half of handling a resize, deferred out of the event handler so a
+    /// burst of resize events costs one of these rather than one each. Called from
+    /// `redraw` rather than only from the `RedrawRequested` arm, because several paths
+    /// paint without going through that arm and none of them should paint at a size the
+    /// window has stopped being.
+    fn apply_pending_resize(&mut self) {
+        let Some(size) = self.pending_size else {
+            return;
+        };
+        // Held rather than dropped when there is no swapchain to configure yet: a
+        // resize can land between the window being created and the gpu being ready,
+        // and the compositor will not repeat itself.
+        if self.gpu.is_none() {
+            return;
+        }
+        self.pending_size = None;
+
+        let gpu = self.gpu.as_mut().expect("checked above");
+        if gpu.size() == (size.width, size.height) {
+            return;
+        }
+        gpu.resize(size.width, size.height);
+        self.relayout();
+    }
+
     fn redraw(&mut self) {
+        self.apply_pending_resize();
+
         // The window is closing; the layout has no active tab left to query.
         if self.layout.is_empty() {
             return;
@@ -705,6 +778,12 @@ impl App {
         // below, because a method call like `self.cell_size()` borrows all of
         // `self` and would conflict with holding `&mut self.gpu`.
         let cell = self.cell_size();
+        // How far a panel's title is indented. It has to be `Metrics::padding` and not
+        // the cell height: the two were the same number until the panel metrics were
+        // snapped to a grid, and a title indented differently from the rows it heads
+        // reads as a misalignment. `draw_panel_title` says as much in its doc comment,
+        // and a test in `tuz-render` is what caught this when the snap made them differ.
+        let panel_inset = tuz_ui::Metrics::from_cell(cell.width, cell.height).padding as f32;
         let active = self.layout.active_pane();
         let blink_on = self.blink_on;
         let active_tab = self.layout.active_index();
@@ -801,6 +880,9 @@ impl App {
             })
             .collect();
         let hovered_button = self.hovered_button;
+        // Resolved before the field destructure below, which takes `self` apart and
+        // leaves the keymap out of reach.
+        let shortcut = hovered_button.and_then(|b| self.button_shortcut(b));
         let hovered_tab = self.hovered_tab;
         let hovered_close = self.hovered_close;
         // Widgets are built here, before the `&mut` field borrows, because building a
@@ -1000,7 +1082,14 @@ impl App {
                 if let Some((_, anchor)) = frame.actions.iter().find(|(b, _)| *b == button) {
                     let window = Rect::from_size(gpu.size().0, gpu.size().1);
                     tuz_render::draw_tooltip(
-                        instances, fonts, button, *anchor, window, theme, colors,
+                        instances,
+                        fonts,
+                        button,
+                        shortcut.as_deref(),
+                        *anchor,
+                        window,
+                        theme,
+                        colors,
                     );
                 }
             }
@@ -1087,7 +1176,7 @@ impl App {
                     &title,
                     theme,
                     colors,
-                    cell.height as f32,
+                    panel_inset,
                 );
                 explorer.ui.layout_split_with(
                     &rows,
@@ -1165,7 +1254,7 @@ impl App {
                 "Plugins",
                 theme,
                 colors,
-                cell.height as f32,
+                panel_inset,
             );
             page.ui.layout_split_with(
                 &widgets,
@@ -1214,7 +1303,7 @@ impl App {
                 "Shortcuts",
                 theme,
                 colors,
-                cell.height as f32,
+                panel_inset,
             );
             page.ui.layout_split_with(
                 &widgets,
@@ -1253,7 +1342,7 @@ impl App {
                 "Tuzminal Settings",
                 theme,
                 colors,
-                cell.height as f32,
+                panel_inset,
             );
             panel.ui.layout_split_with(
                 &widgets,
@@ -1319,6 +1408,24 @@ impl App {
         if !toasts.is_empty() {
             let window = Rect::from_size(gpu.size().0, gpu.size().1);
             tuz_render::draw_toasts(instances, fonts, &toasts, window, theme, colors);
+        }
+        // Last of all, over every pane and every piece of chrome. The tab strip and the
+        // status bar both run the full width of the window, so a border drawn with the
+        // background would be buried under them along the top and bottom edges and
+        // survive only down the sides.
+        let border = Self::border_width(cfg, maximized, gpu.size());
+        if border > 0.0 {
+            let (w, h) = gpu.size();
+            instances.push(Instance::ring(
+                0.0,
+                0.0,
+                w as f32,
+                h as f32,
+                colors.convert(theme.window_border()),
+                radius,
+                tuz_render::instance::FLAG_ROUND_TOP | tuz_render::instance::FLAG_ROUND_BOTTOM,
+                border,
+            ));
         }
         let chrome_end = instances.len() as u32;
 
@@ -2089,12 +2196,26 @@ impl App {
 
     /// Open a tab running `shell`, or the configured default when `None`.
     fn new_tab_with(&mut self, shell: Option<String>) {
+        // Before `new_tab`, which moves focus to the tab being created.
+        let inherited = self.focused_directory();
         let pane = self.layout.new_tab();
         self.pending_shell = shell;
+        self.pending_cwd = inherited;
         self.ensure_session(pane);
         self.pending_shell = None;
+        self.pending_cwd = None;
         self.relayout();
         self.request_redraw();
+    }
+
+    /// The working directory of the focused pane's shell, if it can be read.
+    ///
+    /// `None` covers a pane whose shell has exited, a platform without `/proc`, and the
+    /// case of there being no pane at all — the first launch. Each of those ends with
+    /// the new shell starting in the home directory instead.
+    fn focused_directory(&self) -> Option<std::path::PathBuf> {
+        let pid = self.focused_session()?.child_pid()?;
+        crate::proc::working_directory(pid)
     }
 
     /// Everything on disk, whether or not it loaded.
@@ -2636,6 +2757,50 @@ impl App {
         }
     }
 
+    /// The action a toolbar button performs, where it is one that can be bound.
+    ///
+    /// Kept immediately beside [`Self::press_chrome_button`], which is the other half:
+    /// this exists so a tooltip can name the chord that does the same thing, and the
+    /// pair drifting would have a button advertise a key that does something else. The
+    /// test below walks every button and checks the two agree.
+    ///
+    /// `None` for the four window controls and the two dropdowns. A dropdown is opened
+    /// by the button and has no chord of its own, and minimize/maximize/close belong to
+    /// the compositor's own bindings rather than ours.
+    fn button_action(button: ChromeButton) -> Option<Action> {
+        Some(match button {
+            ChromeButton::NewTab => Action::NewTab,
+            ChromeButton::Settings => Action::OpenSettings,
+            ChromeButton::Explorer => Action::OpenExplorer,
+            ChromeButton::Help => Action::OpenHelp,
+            ChromeButton::Plugins => Action::OpenPlugins,
+            ChromeButton::SplitRight => Action::SplitRight,
+            ChromeButton::SplitDown => Action::SplitDown,
+            ChromeButton::NewTabMenu
+            | ChromeButton::AppMenu
+            | ChromeButton::Minimize
+            | ChromeButton::Maximize
+            | ChromeButton::Close => return None,
+        })
+    }
+
+    /// The chord to show in a button's tooltip, as the user currently has it bound.
+    ///
+    /// Read from the live keymap rather than from `DEFAULT_KEYS`, so someone who
+    /// rebinds `open_settings` sees their own chord. Unbinding it — `"none"` in config —
+    /// leaves the tooltip with just its label, which is correct: there is no key to
+    /// advertise.
+    ///
+    /// The lowest chord when several are bound, matching the sort `chords_for` applies,
+    /// so the tooltip does not flip between equivalents from frame to frame.
+    fn button_shortcut(&self, button: ChromeButton) -> Option<String> {
+        let action = Self::button_action(button)?;
+        self.keymap
+            .chords_for(&action)
+            .first()
+            .map(ToString::to_string)
+    }
+
     fn press_chrome_button(&mut self, button: ChromeButton) {
         match button {
             ChromeButton::NewTabMenu => self.toggle_new_tab_menu(),
@@ -2664,11 +2829,15 @@ impl App {
     }
 
     fn split(&mut self, dir: Direction) {
+        // Before `split`, which gives focus to the new half.
+        let inherited = self.focused_directory();
         if let Some(pane) = self.layout.split(dir) {
             // Layout first so the new session is spawned with the right grid, then
             // again so the resized sibling's PTY learns its new size.
             self.relayout();
+            self.pending_cwd = inherited;
             self.ensure_session(pane);
+            self.pending_cwd = None;
             self.relayout();
             self.request_redraw();
         }
@@ -3987,17 +4156,43 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize(size.width, size.height);
+                // Recorded, not acted on. This used to reconfigure the swapchain,
+                // relayout every pane and paint a frame right here, on the reasoning
+                // that a queued redraw would leave the content a frame behind the
+                // border. That reasoning had the cost backwards.
+                //
+                // All three of the things it did are expensive, and one of them is much
+                // worse than it looks. A relayout resizes every pane's terminal, and
+                // `Term::resize` rewraps the entire scrollback whenever the column
+                // count changes. Measured on this machine, one column step costs:
+                //
+                //     empty history         7µs
+                //      1,000 lines       1.16ms
+                //     10,000 lines       6.68ms
+                //
+                // A height-only change is free by comparison (under a microsecond),
+                // because nothing needs rewrapping.
+                //
+                // So a horizontal drag with a full scrollback cost ~6.7ms of reflow per
+                // resize event, and a drag delivers those far faster than the refresh
+                // rate. Add a swapchain reconfiguration and a paint that blocks in
+                // `get_current_texture`, and events arrived faster than they could be
+                // retired; the queue grew and the window fell further behind the pointer
+                // the longer the drag went on.
+                //
+                // Worth knowing if this looks slow again: the first time it was measured
+                // it came out at 0.17ms, on a terminal with no output in it. An empty
+                // history has nothing to rewrap, so that number said nothing at all
+                // about the case that hurts.
+                //
+                // Only the last size in a batch is real; the rest describe sizes the
+                // window has already stopped being. So keep the newest and let
+                // `RedrawRequested` do the work once, which is also the point at which
+                // the compositor is ready for another frame.
+                self.pending_size = Some(size);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
                 }
-                self.relayout();
-                // Painted here and now rather than queued. `request_redraw` defers to
-                // the next loop iteration, which leaves the content one frame behind
-                // the border the compositor is already drawing at the new size — the
-                // lag you see as the window smearing while you drag its edge. Drawing
-                // synchronously keeps the two in step, and vsync throttles this
-                // naturally, so a burst of resize events cannot outrun the display.
-                self.redraw();
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -4163,5 +4358,141 @@ mod resize_tests {
             Some(ResizeDirection::South)
         );
         assert_eq!(resize_edge_at(W / 2, H - RESIZE_BORDER - 1, W, H), None);
+    }
+}
+
+#[cfg(test)]
+mod border_tests {
+    use super::*;
+
+    fn cfg() -> tuz_config::Config {
+        tuz_config::Config::default()
+    }
+
+    const SIZE: (u32, u32) = (800, 600);
+
+    #[test]
+    fn a_borderless_window_gets_the_configured_width() {
+        let mut c = cfg();
+        c.window.decorations = false;
+        c.window.border_width = 2.0;
+        assert_eq!(App::border_width(&c, false, SIZE), 2.0);
+    }
+
+    #[test]
+    fn decorations_and_maximizing_each_suppress_it() {
+        // Decorated, the compositor draws the frame and this would sit inside it.
+        // Maximized, the window edge is the screen edge and there is nothing to
+        // separate the window from.
+        let mut c = cfg();
+        c.window.border_width = 2.0;
+
+        c.window.decorations = true;
+        assert_eq!(App::border_width(&c, false, SIZE), 0.0);
+
+        c.window.decorations = false;
+        assert_eq!(App::border_width(&c, true, SIZE), 0.0);
+    }
+
+    #[test]
+    fn an_absurd_width_is_clamped_instead_of_inverting_the_background() {
+        // The background is drawn inset by this much on each side. Left unclamped, a
+        // width past half the smaller dimension makes that inset negative, and the
+        // window fills with the outline color.
+        let mut c = cfg();
+        c.window.border_width = 10_000.0;
+        let border = App::border_width(&c, false, SIZE);
+        assert!(border > 0.0);
+        assert!(
+            600.0 - border * 2.0 > 0.0,
+            "{border} leaves no room for the background"
+        );
+    }
+
+    #[test]
+    fn a_negative_width_is_treated_as_none() {
+        let mut c = cfg();
+        c.window.border_width = -4.0;
+        assert_eq!(App::border_width(&c, false, SIZE), 0.0);
+    }
+
+    #[test]
+    fn the_default_config_draws_a_border() {
+        // The whole point of the feature: it is on without being asked for. A default
+        // of zero would make this dead code for everyone who never opens config.toml.
+        assert!(App::border_width(&cfg(), false, SIZE) > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tooltip_shortcut_tests {
+    use super::*;
+
+    /// Every button that runs an action must name it, and no other button may.
+    ///
+    /// The two halves are separate matches — `press_chrome_button` does the thing,
+    /// `button_action` names it for the tooltip — so nothing but this stops a new button
+    /// getting a handler and no chord, or worse, being credited with the wrong one.
+    #[test]
+    fn the_buttons_with_actions_are_exactly_the_ones_with_shortcuts() {
+        // The window controls and the two dropdowns. A dropdown is opened by its button
+        // and has no chord of its own; minimize, maximize and close are the
+        // compositor's bindings rather than ours.
+        let expected_none = [
+            ChromeButton::NewTabMenu,
+            ChromeButton::AppMenu,
+            ChromeButton::Minimize,
+            ChromeButton::Maximize,
+            ChromeButton::Close,
+        ];
+
+        for button in ChromeButton::ALL {
+            let action = App::button_action(button);
+            let should_have = !expected_none.contains(&button);
+            assert_eq!(
+                action.is_some(),
+                should_have,
+                "{button:?}: describe() is {:?}, action is {action:?}",
+                button.describe()
+            );
+        }
+    }
+
+    #[test]
+    fn every_named_action_is_bound_by_default_so_the_tooltip_says_something() {
+        // A button that names an action nothing is bound to shows a bare label. That is
+        // correct behaviour for an unbound chord, but out of the box each of these
+        // should carry a key — otherwise the feature is invisible on a fresh install.
+        let keymap = Keymap::from_config(
+            tuz_config::DEFAULT_KEYS.iter().copied(),
+            &std::collections::HashSet::new(),
+        )
+        .keymap;
+
+        for button in ChromeButton::ALL {
+            let Some(action) = App::button_action(button) else {
+                continue;
+            };
+            assert!(
+                !keymap.chords_for(&action).is_empty(),
+                "{button:?} points at {action:?}, which no default chord binds"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chord_shown_is_the_lowest_of_several() {
+        // Four arrow/letter pairs are bound to the focus actions, and the tooltip must
+        // pick deterministically or it flickers between them as the map is rebuilt.
+        let keymap = Keymap::from_config(
+            tuz_config::DEFAULT_KEYS.iter().copied(),
+            &std::collections::HashSet::new(),
+        )
+        .keymap;
+        let chords = keymap.chords_for(&Action::NewTab);
+        assert!(!chords.is_empty());
+        let mut sorted = chords.clone();
+        sorted.sort();
+        assert_eq!(chords, sorted, "chords_for must return a stable order");
     }
 }

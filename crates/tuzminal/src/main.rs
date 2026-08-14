@@ -4,6 +4,12 @@ mod app;
 mod appicon;
 mod bundled;
 #[cfg(all(unix, not(target_os = "macos")))]
+// Freedesktop only, matching the `--install-desktop-entry` flag and everything else
+// that reaches for it: macOS wants an app bundle and Windows a shortcut, neither of
+// which is served by writing files into `~/.local/share`. Ungated, the module's only
+// non-test consumer disappeared on those platforms and `APP_ID` became dead code — a
+// hard error under the `-D warnings` that CI builds with.
+#[cfg(all(unix, not(target_os = "macos")))]
 mod desktop;
 mod explorer;
 mod gpu;
