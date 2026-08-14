@@ -1074,6 +1074,84 @@ mod tests {
     }
 
     #[test]
+    fn centering_leftovers_are_a_sawtooth_across_a_resize() {
+        // Not a bug in centering — this is what centering *is*, and it is why the caller
+        // suspends it during a window drag. The remainder after the last whole cell grows
+        // as the window widens and drops back the moment another column fits, so
+        // recomputing it every frame walks the text block out and snaps it back.
+        //
+        // Pinned here so the reason the caller turns it off does not become mysterious.
+        let cell = CellSize {
+            width: 8,
+            height: 16,
+        };
+        let opts = LayoutOptions {
+            padding_x: 0,
+            padding_y: 0,
+            center_grid: true,
+            cell,
+            ..LayoutOptions::default()
+        };
+
+        let offset_at = |width: u32| {
+            let pr = PaneRect {
+                pane: PaneId(1),
+                rect: Rect::new(0, 0, width, 100),
+            };
+            grid_for(pr, &opts).content.x
+        };
+
+        // Across one cell's worth of width the offset climbs and then resets, rather than
+        // moving in one direction.
+        let offsets: Vec<i32> = (800..800 + cell.width).map(offset_at).collect();
+        let climbed = offsets.iter().max().copied().unwrap();
+        assert!(
+            climbed > offsets[0],
+            "the offset never moved, so this pane is not being centered at all"
+        );
+        assert_eq!(
+            offset_at(800 + cell.width),
+            offsets[0],
+            "a whole extra column should return the offset to where it started"
+        );
+    }
+
+    #[test]
+    fn centering_off_anchors_the_content_and_holds_it_there() {
+        // What a drag uses instead. The origin must not move with the window width, or
+        // suspending centering would not have bought anything.
+        let cell = CellSize {
+            width: 8,
+            height: 16,
+        };
+        let opts = LayoutOptions {
+            padding_x: 4,
+            padding_y: 4,
+            center_grid: false,
+            cell,
+            ..LayoutOptions::default()
+        };
+
+        let origin_at = |width: u32| {
+            let pr = PaneRect {
+                pane: PaneId(1),
+                rect: Rect::new(0, 0, width, 100),
+            };
+            let g = grid_for(pr, &opts);
+            (g.content.x, g.content.y)
+        };
+
+        let first = origin_at(800);
+        for width in 800..900 {
+            assert_eq!(
+                origin_at(width),
+                first,
+                "the content origin moved at width {width}, so it would still shimmer"
+            );
+        }
+    }
+
+    #[test]
     fn center_grid_balances_the_leftover_pixels() {
         let (l, first) = Layout::new();
         let opts = LayoutOptions {

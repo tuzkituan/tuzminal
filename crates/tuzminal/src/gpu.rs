@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tuz_config::{Config, GpuBackend, PowerPreference, Rgba};
 use winit::window::Window;
 
@@ -43,6 +44,16 @@ pub struct Gpu {
     premultiplied_alpha: bool,
 
     adapter_info: wgpu::AdapterInfo,
+
+    /// Timings for the last frame, for diagnosing a slow resize.
+    ///
+    /// Kept here rather than measured by the caller because these are the two calls that
+    /// talk to the compositor — a swapchain reconfiguration and an image acquisition —
+    /// and they are the only part of a frame whose cost has nothing to do with how much
+    /// work the frame contains.
+    last_configure: Duration,
+    last_acquire: Duration,
+    last_present: Duration,
 }
 
 impl Gpu {
@@ -130,14 +141,15 @@ impl Gpu {
             pick_alpha_mode(&caps.alpha_modes, want_transparency);
         config.alpha_mode = alpha_mode;
         config.present_mode = pick_present_mode(&caps.present_modes, cfg.performance.vsync);
-        // One frame in flight instead of the default two, trading throughput for
-        // latency: a keystroke is the thing a terminal is judged on, and the second
-        // buffer costs a frame of it.
+        // Two frames in flight, which is also wgpu's default.
         //
-        // Not a fix for slow resizing, which is what an earlier version of this comment
-        // claimed. That was reflow of the scrollback happening once per resize event,
-        // and it is dealt with where the events are handled.
-        config.desired_maximum_frame_latency = 1;
+        // This was 1 for a while, on the reasoning that fewer buffered frames means less
+        // latency per keystroke. That is backwards. With only one image in flight there is
+        // nothing to acquire until the display has finished with the previous frame, so
+        // the client *blocks* for a refresh interval before it can begin drawing — the
+        // opposite of low latency. Measured, going from 1 to 2 halved the time spent in
+        // `get_current_texture` and nearly doubled the frame rate; 3 was no better than 2.
+        config.desired_maximum_frame_latency = 2;
 
         log::debug!(
             "surface: {:?} {:?} {:?} ({width}x{height})",
@@ -156,6 +168,9 @@ impl Gpu {
             format_is_srgb,
             premultiplied_alpha,
             adapter_info,
+            last_configure: Duration::ZERO,
+            last_acquire: Duration::ZERO,
+            last_present: Duration::ZERO,
         })
     }
 
@@ -193,7 +208,29 @@ impl Gpu {
         }
         self.config.width = width;
         self.config.height = height;
+
+        // Timed because this is the expensive one and the easiest to overlook. A
+        // `configure` destroys and recreates the swapchain, which on Vulkan means the
+        // driver may wait for the GPU to finish with the old images first — nothing to do
+        // with how much work the frame itself does.
+        let started = Instant::now();
         self.surface.configure(&self.device, &self.config);
+        self.last_configure = started.elapsed();
+    }
+
+    /// How long the last swapchain reconfiguration took.
+    pub fn last_configure(&self) -> Duration {
+        self.last_configure
+    }
+
+    /// How long the last frame spent waiting to acquire an image.
+    pub fn last_acquire(&self) -> Duration {
+        self.last_acquire
+    }
+
+    /// How long the last frame spent submitting and presenting.
+    pub fn last_present(&self) -> Duration {
+        self.last_present
     }
 
     /// Re-apply presentation settings after a config reload.
@@ -245,7 +282,13 @@ impl Gpu {
     ) -> FrameOutcome {
         use wgpu::CurrentSurfaceTexture as Acquired;
 
-        let (frame, outcome) = match self.surface.get_current_texture() {
+        // Acquisition blocks until the presentation engine has an image free, so this
+        // is where waiting on the display shows up rather than in any of our own work.
+        let acquire_started = Instant::now();
+        let acquired = self.surface.get_current_texture();
+        self.last_acquire = acquire_started.elapsed();
+
+        let (frame, outcome) = match acquired {
             Acquired::Success(frame) => (frame, FrameOutcome::Presented),
             // Usable this frame, but the surface has drifted from its config.
             // Present it, then reconfigure so the next frame is correct.
@@ -298,9 +341,11 @@ impl Gpu {
             draw(&mut pass);
         }
 
+        let present_started = Instant::now();
         self.queue.submit(Some(encoder.finish()));
         // Presenting lives on the queue as of wgpu 30, not on the texture.
         self.queue.present(frame);
+        self.last_present = present_started.elapsed();
 
         if outcome == FrameOutcome::Redraw {
             self.recover();
@@ -349,7 +394,24 @@ fn pick_alpha_mode(
 
 fn pick_present_mode(available: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
     if vsync {
-        // Fifo is mandatory on every backend, so vsync can never fail.
+        // Mailbox is vsync in the sense that matters — it never tears, because it only
+        // ever shows a whole frame at a vblank — but it does not make the *client* wait
+        // for one. Fifo does: `get_current_texture` blocks until the display has released
+        // an image, which was measured at 15.4ms of every 17.8ms frame on this machine.
+        // A window cannot follow a pointer it spends a whole refresh interval behind.
+        //
+        // Measured with `--resize-bench`, mean per frame:
+        //
+        //     Fifo,    latency 1     acquire 15.36ms    frame 17.81ms
+        //     Fifo,    latency 2     acquire  7.42ms    frame  9.91ms
+        //     Mailbox, latency 2     acquire   144µs    frame  1.51ms
+        //
+        // The cost is one more image in flight, which for a terminal-sized surface is a
+        // few megabytes. Fifo is the fallback because it is the only mode every backend
+        // is required to support, so vsync can never fail outright.
+        if available.contains(&wgpu::PresentMode::Mailbox) {
+            return wgpu::PresentMode::Mailbox;
+        }
         return wgpu::PresentMode::AutoVsync;
     }
     for mode in [

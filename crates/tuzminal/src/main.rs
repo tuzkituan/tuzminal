@@ -51,6 +51,15 @@ struct Cli {
     #[arg(long)]
     install_desktop_entry: bool,
 
+    /// Drive a window-resize sweep, print where each frame's time went, and exit.
+    ///
+    /// A swapchain reconfiguration and an image acquisition only cost anything against a
+    /// real compositor, so there is no way to measure them from a test. This is how the
+    /// question "is resizing slow because of our work or because of the display" gets an
+    /// answer without a human dragging a window edge and describing what they saw.
+    #[arg(long, hide = true)]
+    resize_bench: bool,
+
     /// Validate the config and theme, print any problems, and exit.
     #[arg(long)]
     config_check: bool,
@@ -207,7 +216,7 @@ fn main() -> Result<()> {
         };
     }
 
-    app::App::run(paths)
+    app::App::run_with(paths, cli.resize_bench)
 }
 
 fn init_logging(verbosity: u8) {

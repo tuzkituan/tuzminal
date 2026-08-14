@@ -107,6 +107,31 @@ const RESIZE_BORDER: i32 = 6;
 /// behind the window after the mouse is released.
 const GRID_SETTLE: Duration = Duration::from_millis(80);
 
+/// How many frames `--resize-bench` averages over.
+const BENCH_FRAMES: u64 = 200;
+
+/// Accumulated timings for `--resize-bench`.
+#[derive(Debug)]
+pub struct ResizeBench {
+    frames: u64,
+    configure: Duration,
+    acquire: Duration,
+    present: Duration,
+    started: Instant,
+}
+
+impl Default for ResizeBench {
+    fn default() -> Self {
+        Self {
+            frames: 0,
+            configure: Duration::ZERO,
+            acquire: Duration::ZERO,
+            present: Duration::ZERO,
+            started: Instant::now(),
+        }
+    }
+}
+
 /// Wayland app id and X11 `WM_CLASS`.
 ///
 /// Must match the basename of the installed `.desktop` file, or the desktop
@@ -172,6 +197,9 @@ pub struct App {
 
     /// Whether this frame is carrying a resize, for the timing log below.
     resizing: bool,
+
+    /// State for `--resize-bench`, absent in a normal run.
+    bench: Option<ResizeBench>,
 
     /// Resize events received since the last one was acted on.
     ///
@@ -308,7 +336,10 @@ pub struct App {
 
 impl App {
     /// Build the event loop, spawn the first shell, and run until exit.
-    pub fn run(paths: Paths) -> Result<()> {
+    ///
+    /// `bench` drives a resize sweep instead and exits with a report — see
+    /// `--resize-bench`.
+    pub fn run_with(paths: Paths, bench: bool) -> Result<()> {
         let mut settings = ConfigManager::load(paths);
         if let Some(err) = settings.last_error() {
             log::warn!("configuration problem, using defaults:\n{err}");
@@ -410,6 +441,7 @@ impl App {
             grid_due: None,
             resize_events: 0,
             resizing: false,
+            bench: None,
             menu: None,
             menu_rect: None,
             help: None,
@@ -434,6 +466,10 @@ impl App {
             plugins,
             exit_requested: false,
         };
+
+        if bench {
+            app.bench = Some(ResizeBench::default());
+        }
 
         event_loop.run_app(&mut app).context("event loop failed")?;
         Ok(())
@@ -516,7 +552,14 @@ impl App {
         LayoutOptions {
             padding_x: cfg.window.padding.x,
             padding_y: cfg.window.padding.y,
-            center_grid: cfg.window.center_grid,
+            // Suspended mid-drag. Centering splits the pixels left over after the last
+            // whole cell between the two edges, and that remainder is a sawtooth: it
+            // grows as the window widens, then drops back to nearly zero the moment
+            // another column fits. Recomputed every frame of a drag, it walks the whole
+            // text block out by half a cell and snaps it back — up to 4px across and 9px
+            // down, which is the shimmering. Anchored to the padding instead, the content
+            // holds still, and centering returns in the one frame after the drag settles.
+            center_grid: cfg.window.center_grid && self.grid_due.is_none(),
             divider_width: cfg.window.split_divider_width as u32,
             tab_bar_height: self.tab_bar_height(),
             status_bar_height: self.status_bar_height(),
@@ -684,6 +727,55 @@ impl App {
             }
         }
         self.grid_due = None;
+    }
+
+    /// Drive the resize benchmark, if `--resize-bench` asked for one.
+    ///
+    /// Exists because the thing being measured cannot be measured from a test: a
+    /// swapchain reconfiguration and an image acquisition only have a cost against a real
+    /// compositor. Requesting sizes from inside the app is not identical to a pointer
+    /// drag — the compositor is not driving an interactive resize — but it exercises the
+    /// same configure/acquire/present path at the same rate, which is the part in
+    /// question.
+    fn drive_resize_bench(&mut self) {
+        let Some(bench) = self.bench.as_mut() else {
+            return;
+        };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        if let Some(gpu) = self.gpu.as_ref() {
+            if bench.frames > 0 {
+                bench.configure += gpu.last_configure();
+                bench.acquire += gpu.last_acquire();
+                bench.present += gpu.last_present();
+            }
+        }
+        bench.frames += 1;
+
+        if bench.frames > BENCH_FRAMES {
+            let n = (bench.frames - 1) as u32;
+            println!("--- resize bench over {n} frames (mean per frame) ---");
+            println!("  surface.configure   {:>9.2?}", bench.configure / n);
+            println!("  get_current_texture {:>9.2?}", bench.acquire / n);
+            println!("  submit + present    {:>9.2?}", bench.present / n);
+            println!(
+                "  ---- compositor     {:>9.2?}",
+                (bench.configure + bench.acquire + bench.present) / n
+            );
+            println!(
+                "  wall clock          {:>9.2?}",
+                bench.started.elapsed() / n
+            );
+            self.exit_requested = true;
+            return;
+        }
+
+        // A sawtooth across 400px of width, which is what dragging an edge produces.
+        let step = (bench.frames % 40) as u32 * 10;
+        let _ = window.request_inner_size(PhysicalSize::new(900 + step, 600));
+        window.request_redraw();
     }
 
     /// Apply a deferred grid resize once the drag has stopped moving.
@@ -1587,11 +1679,18 @@ impl App {
         });
 
         if let Some(started) = started {
-            // Includes `get_current_texture`, which blocks until the display has finished
-            // with the previous frame — so this is the number that says whether resizing
-            // is limited by our own work or by waiting for the compositor. Anything close
-            // to a refresh interval is the latter.
-            log::debug!("resize frame took {:.2?}", started.elapsed());
+            // Broken out because the three have completely different fixes: `configure`
+            // is swapchain recreation, `acquire` is waiting for the display to release an
+            // image, and what is left over is our own drawing.
+            let total = started.elapsed();
+            if let Some(gpu) = self.gpu.as_ref() {
+                let (configure, acquire, present) =
+                    (gpu.last_configure(), gpu.last_acquire(), gpu.last_present());
+                log::debug!(
+                    "resize frame {total:.2?} = configure {configure:.2?} + acquire {acquire:.2?} + present {present:.2?} + our work {:.2?}",
+                    total.saturating_sub(configure + acquire + present)
+                );
+            }
         }
         self.resizing = false;
 
@@ -4333,6 +4432,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.drive_resize_bench();
+
         // Events can arrive without a proxy wakeup if several land at once.
         self.drain_pty_events();
 
