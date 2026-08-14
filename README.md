@@ -8,7 +8,7 @@ abstracted so macOS and Windows are a port rather than a rewrite.
 
 > **Status: M1–M5 complete.** It runs shells, renders text, splits, tabs with a
 > drawn tab bar, themes, a plugin status bar, and loads Lua and WASM plugins.
-> 556 tests pass, including GPU tests that read pixels back. macOS and Windows
+> 570 tests pass, including GPU tests that read pixels back. macOS and Windows
 > are untested. See [Status](#status) for the honest detail.
 
 ## Build and run
@@ -194,7 +194,7 @@ nothing.
 | `tuz-plugin` | Host, Lua runtime, WASM runtime | 57 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
 | `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 67 |
-| `tuz-ui` | Widget model, focus order, hit-testing | 42 |
+| `tuz-ui` | Widget model, focus order, hit-testing, scrolling | 56 |
 | `tuzminal` | Application, GPU surface, CLI, packages, settings panel | 87 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
@@ -220,7 +220,7 @@ or run** — treat it as unverified.
 ## Development
 
 ```bash
-cargo test --workspace --features tuz-core/test-util   # 556 tests
+cargo test --workspace --features tuz-core/test-util   # 570 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
 ```

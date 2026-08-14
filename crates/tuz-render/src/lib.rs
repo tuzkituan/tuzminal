@@ -22,7 +22,7 @@ pub use instance::{
     build_pane, ColorSpace, Instance, PaneGeometry, FLAG_COLOR_GLYPH, FLAG_TEXTURED,
 };
 pub use text::{draw_in_box, measure, Align};
-pub use widget::{center_panel, draw_panel_frame, draw_panel_title, draw_widgets};
+pub use widget::{center_panel, draw_panel_frame, draw_panel_title, draw_scrollbar, draw_widgets};
 
 use tuz_font::atlas::{Atlas, BYTES_PER_PIXEL};
 

@@ -112,6 +112,9 @@ pub struct App {
     hovered_close: bool,
     /// The settings panel, when open. `None` means closed.
     panel: Option<SettingsPanel>,
+    /// The panel's scrollable body from the last frame, for wheel scrolling and for
+    /// clipping rows to it.
+    panel_body: Option<Rect>,
 
     /// Cursor blink phase and when it last flipped.
     blink_on: bool,
@@ -227,6 +230,7 @@ impl App {
             hovered_tab: None,
             hovered_close: false,
             panel: None,
+            panel_body: None,
             blink_on: true,
             blink_at: Instant::now(),
             last_input: Instant::now(),
@@ -607,6 +611,9 @@ impl App {
             tuz_render::draw_status_bar(instances, fonts, frame.status_bar, &items, theme, colors);
         }
         // The panel goes last so it sits over terminal content and chrome alike.
+        let mut panel_body: Option<Rect> = None;
+        let mut widget_start = 0u32;
+        let mut widget_end = 0u32;
         if let (Some(widgets), Some(panel)) = (panel_widgets, self.panel.as_mut()) {
             let (w, h) = SettingsPanel::preferred_size(cell.width, cell.height);
             let window = Rect::from_size(gpu.size().0, gpu.size().1);
@@ -622,7 +629,15 @@ impl App {
                 colors,
             );
             panel.ui.layout(&widgets, body, cell.height);
+            panel_body = Some(body);
+
+            // Rows are clipped to the body, so a scrolled list cannot draw over the
+            // title bar or spill outside the panel.
+            widget_start = instances.len() as u32;
             tuz_render::draw_widgets(instances, fonts, &panel.ui, theme, colors);
+            widget_end = instances.len() as u32;
+
+            tuz_render::draw_scrollbar(instances, &panel.ui, body, theme, colors);
         }
         let chrome_end = instances.len() as u32;
 
@@ -648,11 +663,29 @@ impl App {
             }
             if chrome_end > divider_start {
                 pass.set_scissor_rect(0, 0, width, height);
-                renderer.draw(pass, divider_start..chrome_end);
+                match panel_body {
+                    // Split around the widget range so only it is clipped: the panel
+                    // frame, title and scrollbar must draw unclipped.
+                    Some(body) if widget_end > widget_start => {
+                        renderer.draw(pass, divider_start..widget_start);
+                        pass.set_scissor_rect(
+                            body.x.max(0) as u32,
+                            body.y.max(0) as u32,
+                            body.width.min(width),
+                            body.height.min(height),
+                        );
+                        renderer.draw(pass, widget_start..widget_end);
+                        pass.set_scissor_rect(0, 0, width, height);
+                        renderer.draw(pass, widget_end..chrome_end);
+                    }
+                    _ => renderer.draw(pass, divider_start..chrome_end),
+                }
             }
         });
 
         // The field borrows end here, so `self` is usable again.
+        self.panel_body = panel_body;
+
         match outcome {
             FrameOutcome::Presented | FrameOutcome::Skipped => {}
             FrameOutcome::Redraw => self.request_redraw(),
@@ -1263,6 +1296,11 @@ impl App {
                     Some(panel) => panel.ui.key(key),
                     None => return,
                 };
+                // Tabbing to a row below the fold must bring it into view, or the
+                // focus ring moves somewhere invisible and the key looks dead.
+                if let (Some(panel), Some(body)) = (self.panel.as_mut(), self.panel_body) {
+                    panel.ui.scroll_to_focus(body);
+                }
                 match response {
                     tuz_ui::KeyResponse::Close => self.close_settings(),
                     tuz_ui::KeyResponse::Action(action) => self.handle_panel_action(action),
@@ -1581,6 +1619,22 @@ impl App {
     }
 
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
+        // The panel owns the wheel while it is open, or scrolling over a settings
+        // list would scroll the terminal hidden behind it.
+        if self.panel.is_some() {
+            let cell_height = self.cell_size().height.max(1) as f64;
+            let lines = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -(y as f64 * 3.0 * cell_height),
+                MouseScrollDelta::PixelDelta(pos) => -pos.y,
+            };
+            if let Some(panel) = self.panel.as_mut() {
+                if panel.ui.scroll_by(lines.round() as i32) {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
         let Some(frame) = self.frame.clone() else {
             return;
         };

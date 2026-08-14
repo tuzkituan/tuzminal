@@ -305,8 +305,13 @@ pub struct Ui {
     /// Index into `placed`. Stored as an id as well so focus survives a rebuild.
     focus: Option<WidgetId>,
     hover: Option<WidgetId>,
-    /// Total height the last layout needed, for scrolling or sizing the panel.
+    /// Total height the last layout needed.
     content_height: u32,
+    /// Height of the area the content was laid out into.
+    viewport_height: u32,
+    /// How far the content is scrolled, in pixels. Always clamped so the last row
+    /// can reach the bottom edge and no further.
+    scroll: u32,
 }
 
 impl Ui {
@@ -327,7 +332,9 @@ impl Ui {
 
         let left = area.x + metrics.padding as i32;
         let width = area.width.saturating_sub(metrics.padding * 2);
-        let mut y = area.y + metrics.padding as i32;
+        // Scroll shifts every row up. Applied here rather than at draw time so
+        // hit-testing and focus operate on what is actually on screen.
+        let mut y = area.y + metrics.padding as i32 - self.scroll as i32;
 
         for widget in widgets {
             if matches!(widget, Widget::Label { heading: true, .. }) && !self.placed.is_empty() {
@@ -354,7 +361,20 @@ impl Ui {
             y += (metrics.row_height + metrics.row_gap) as i32;
         }
 
-        self.content_height = (y - area.y).max(0) as u32 + metrics.padding;
+        // Measured without the scroll offset, or the content would appear to shrink
+        // as it scrolls and the clamp below would drift.
+        self.content_height = (y - area.y + self.scroll as i32).max(0) as u32 + metrics.padding;
+        self.viewport_height = area.height;
+
+        // Re-clamp after a resize or a change in content: a panel that grew, or a
+        // window that got taller, must not leave the view scrolled past the end.
+        let max = self.max_scroll();
+        if self.scroll > max {
+            self.scroll = max;
+            // Redo the placement with the corrected offset rather than showing one
+            // stale frame at the old position.
+            self.relayout_rows(area, metrics);
+        }
 
         // Drop focus and hover if the widget they referred to is gone.
         if let Some(id) = self.focus {
@@ -369,11 +389,74 @@ impl Ui {
         }
     }
 
+    /// Reposition already-placed rows for the current scroll offset.
+    ///
+    /// Cheaper than rebuilding the widget list, and used only to correct a clamp.
+    fn relayout_rows(&mut self, area: Rect, metrics: Metrics) {
+        let mut y = area.y + metrics.padding as i32 - self.scroll as i32;
+        let mut first = true;
+        for placed in &mut self.placed {
+            if matches!(placed.widget, Widget::Label { heading: true, .. }) && !first {
+                y += metrics.heading_space as i32;
+            }
+            first = false;
+            let height = placed.rect.height;
+            placed.rect.y = y;
+            placed.value_rect.y = y;
+            y += (height + metrics.row_gap) as i32;
+        }
+    }
+
     pub fn placed(&self) -> &[Placed] {
         &self.placed
     }
     pub fn content_height(&self) -> u32 {
         self.content_height
+    }
+    pub fn scroll(&self) -> u32 {
+        self.scroll
+    }
+
+    /// The furthest the content can scroll: zero when everything already fits.
+    pub fn max_scroll(&self) -> u32 {
+        self.content_height.saturating_sub(self.viewport_height)
+    }
+
+    /// True when the content is taller than the area it was laid out into.
+    pub fn is_scrollable(&self) -> bool {
+        self.max_scroll() > 0
+    }
+
+    /// Scroll by `delta` pixels, positive being downward. Returns whether it moved.
+    pub fn scroll_by(&mut self, delta: i32) -> bool {
+        let max = self.max_scroll() as i32;
+        let next = (self.scroll as i32 + delta).clamp(0, max) as u32;
+        let moved = next != self.scroll;
+        self.scroll = next;
+        moved
+    }
+
+    /// Scroll so the focused widget is fully visible.
+    ///
+    /// Called after focus moves: tabbing to a control below the fold would otherwise
+    /// move an invisible focus ring, which looks like the key did nothing.
+    pub fn scroll_to_focus(&mut self, area: Rect) -> bool {
+        let Some(id) = self.focus else {
+            return false;
+        };
+        let Some(rect) = self.rect_of(id) else {
+            return false;
+        };
+
+        if rect.y < area.y {
+            let delta = rect.y - area.y;
+            return self.scroll_by(delta);
+        }
+        if rect.bottom() > area.bottom() {
+            let delta = rect.bottom() - area.bottom();
+            return self.scroll_by(delta);
+        }
+        false
     }
     pub fn focused(&self) -> Option<WidgetId> {
         self.focus
@@ -1120,5 +1203,213 @@ mod tests {
         assert!(large.row_height > small.row_height);
         assert!(large.padding > small.padding);
         assert!(large.value_width > small.value_width);
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    /// More rows than the viewport can show.
+    fn many(n: u32) -> Vec<Widget> {
+        (0..n)
+            .map(|i| Widget::toggle(WidgetId(i), format!("row {i}"), false))
+            .collect()
+    }
+
+    /// A viewport deliberately shorter than the content.
+    fn small() -> Rect {
+        Rect::new(0, 0, 400, 120)
+    }
+
+    fn scrolled(n: u32) -> Ui {
+        let mut ui = Ui::new();
+        ui.layout(&many(n), small(), 20);
+        ui
+    }
+
+    #[test]
+    fn content_shorter_than_the_viewport_does_not_scroll() {
+        let mut ui = Ui::new();
+        ui.layout(&many(1), Rect::new(0, 0, 400, 600), 20);
+        assert!(!ui.is_scrollable());
+        assert_eq!(ui.max_scroll(), 0);
+        assert!(!ui.scroll_by(100), "there is nowhere to scroll");
+    }
+
+    #[test]
+    fn content_taller_than_the_viewport_scrolls() {
+        // The shipped panel had ~20 rows in a viewport this size and silently hid the
+        // last seven, Save button included.
+        let ui = scrolled(20);
+        assert!(ui.is_scrollable());
+        assert!(ui.max_scroll() > 0);
+    }
+
+    #[test]
+    fn scrolling_moves_rows_up_by_exactly_the_offset() {
+        let mut ui = scrolled(20);
+        let before = ui.placed()[0].rect.y;
+
+        ui.scroll_by(40);
+        ui.layout(&many(20), small(), 20);
+        assert_eq!(ui.placed()[0].rect.y, before - 40);
+    }
+
+    #[test]
+    fn scrolling_is_clamped_at_both_ends() {
+        let mut ui = scrolled(20);
+
+        assert!(!ui.scroll_by(-100), "already at the top");
+        assert_eq!(ui.scroll(), 0);
+
+        ui.scroll_by(100_000);
+        assert_eq!(ui.scroll(), ui.max_scroll(), "cannot scroll past the end");
+        assert!(!ui.scroll_by(10), "and stays there");
+    }
+
+    #[test]
+    fn the_last_row_can_reach_the_viewport() {
+        // The property that actually matters: at maximum scroll, the final row —
+        // which is the Save button in the real panel — must be visible.
+        let mut ui = scrolled(20);
+        ui.scroll_by(ui.max_scroll() as i32);
+        ui.layout(&many(20), small(), 20);
+
+        let last = ui.placed().last().unwrap().rect;
+        assert!(
+            last.bottom() <= small().bottom(),
+            "the last row ends at {} but the viewport ends at {}",
+            last.bottom(),
+            small().bottom()
+        );
+        assert!(last.y >= small().y, "and is not scrolled off the top");
+    }
+
+    #[test]
+    fn content_height_is_measured_independently_of_the_scroll_offset() {
+        // Measuring the scrolled positions would make the content appear to shrink as
+        // it scrolls, and the clamp would then drift toward zero.
+        let mut ui = scrolled(20);
+        let unscrolled = ui.content_height();
+
+        ui.scroll_by(60);
+        ui.layout(&many(20), small(), 20);
+        assert_eq!(ui.content_height(), unscrolled);
+    }
+
+    #[test]
+    fn growing_the_viewport_re_clamps_the_offset() {
+        // Resizing the window taller while scrolled to the end must not leave the
+        // view parked past the content.
+        let mut ui = scrolled(20);
+        ui.scroll_by(ui.max_scroll() as i32);
+
+        ui.layout(&many(20), Rect::new(0, 0, 400, 10_000), 20);
+        assert_eq!(ui.scroll(), 0, "everything fits now");
+        assert!(!ui.is_scrollable());
+    }
+
+    #[test]
+    fn shrinking_the_content_re_clamps_the_offset() {
+        let mut ui = scrolled(30);
+        ui.scroll_by(ui.max_scroll() as i32);
+        let far = ui.scroll();
+
+        ui.layout(&many(6), small(), 20);
+        assert!(ui.scroll() < far, "the offset should have been pulled back");
+        assert!(ui.scroll() <= ui.max_scroll());
+    }
+
+    #[test]
+    fn hit_testing_follows_the_scrolled_position() {
+        // Hit-testing against unscrolled rects would make clicks land on the wrong
+        // control the moment the list moves.
+        let mut ui = scrolled(20);
+        let rect = ui.rect_of(WidgetId(0)).unwrap();
+        assert_eq!(ui.hit(rect.center_x(), rect.center_y()), Some(WidgetId(0)));
+
+        ui.scroll_by(200);
+        ui.layout(&many(20), small(), 20);
+
+        // The first row has moved off the top, so that point now hits something else
+        // or nothing — but never still row 0.
+        assert_ne!(ui.hit(rect.center_x(), rect.center_y()), Some(WidgetId(0)));
+
+        // And the row now at that position is the one hit-testing reports.
+        let now = ui.hit(rect.center_x(), rect.center_y());
+        if let Some(id) = now {
+            let moved = ui.rect_of(id).unwrap();
+            assert!(moved.contains(rect.center_x(), rect.center_y()));
+        }
+    }
+
+    #[test]
+    fn scroll_to_focus_pulls_a_row_below_the_fold_into_view() {
+        let mut ui = scrolled(20);
+        let last = WidgetId(19);
+        ui.focus(last);
+
+        assert!(
+            ui.rect_of(last).unwrap().bottom() > small().bottom(),
+            "the last row should start off-screen"
+        );
+
+        assert!(ui.scroll_to_focus(small()), "it should have scrolled");
+        ui.layout(&many(20), small(), 20);
+        assert!(
+            ui.rect_of(last).unwrap().bottom() <= small().bottom(),
+            "and now be visible"
+        );
+    }
+
+    #[test]
+    fn scroll_to_focus_pulls_a_row_above_the_fold_into_view() {
+        let mut ui = scrolled(20);
+        ui.scroll_by(ui.max_scroll() as i32);
+        ui.layout(&many(20), small(), 20);
+
+        ui.focus(WidgetId(0));
+        assert!(ui.scroll_to_focus(small()));
+        ui.layout(&many(20), small(), 20);
+        assert!(ui.rect_of(WidgetId(0)).unwrap().y >= small().y);
+    }
+
+    #[test]
+    fn scroll_to_focus_does_nothing_for_an_already_visible_row() {
+        // Otherwise every focus move would jitter the list.
+        let mut ui = scrolled(20);
+        ui.focus(WidgetId(0));
+        assert!(!ui.scroll_to_focus(small()));
+        assert_eq!(ui.scroll(), 0);
+    }
+
+    #[test]
+    fn scroll_to_focus_with_no_focus_is_a_no_op() {
+        let mut ui = scrolled(20);
+        assert!(!ui.scroll_to_focus(small()));
+    }
+
+    #[test]
+    fn tabbing_through_every_row_keeps_the_focused_one_visible() {
+        // The end-to-end property: keyboard navigation must never move the focus ring
+        // somewhere the user cannot see.
+        let widgets = many(20);
+        let mut ui = Ui::new();
+        ui.layout(&widgets, small(), 20);
+
+        for step in 0..20 {
+            ui.key(UiKey::Tab);
+            ui.scroll_to_focus(small());
+            ui.layout(&widgets, small(), 20);
+
+            let focused = ui.focused().expect("tab should focus something");
+            let rect = ui.rect_of(focused).unwrap();
+            assert!(
+                rect.y >= small().y && rect.bottom() <= small().bottom(),
+                "step {step}: focused row {rect:?} is outside the viewport {:?}",
+                small()
+            );
+        }
     }
 }

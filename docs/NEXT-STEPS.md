@@ -30,12 +30,6 @@ drawing, but the interactions themselves have never had a real pointer on them.
 
 ## Panel gaps worth closing
 
-**Scrolling.** `Ui::content_height` is computed and returned but nothing reads it.
-If the widget list grows past the panel height, the overflow is simply not visible —
-there is no scrollbar and no clipping. Two things needed: a scroll offset applied
-during `Ui::layout`, and a scissor rect so rows cannot draw outside the panel. The
-scissor infrastructure already exists; `redraw` sets one per pane.
-
 **A text-input widget.** Deliberately skipped: a cursor, selection, clipboard and
 eventually IME is a lot for one setting, and the font picker is better as a dropdown
 regardless. But `[shell] program`, `args` and `env` cannot be edited without one, and

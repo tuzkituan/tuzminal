@@ -321,6 +321,49 @@ fn draw_row_text(
     }
 }
 
+/// Draw a scrollbar on the right of `area`, if the content overflows.
+///
+/// Without this there is no indication that anything is below the fold, which is how
+/// a panel silently hides its own Save button.
+pub fn draw_scrollbar(
+    out: &mut Vec<Instance>,
+    ui: &Ui,
+    area: Rect,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    if !ui.is_scrollable() || area.height == 0 {
+        return;
+    }
+
+    let width = 4.0;
+    let x = area.right() as f32 - width;
+
+    // Track.
+    out.push(Instance::solid(
+        x,
+        area.y as f32,
+        width,
+        area.height as f32,
+        colors.convert_opaque(theme.split_divider()),
+    ));
+
+    // Thumb, sized by the visible fraction and floored so it stays grabbable when
+    // the content is very long.
+    let visible = area.height as f32 / ui.content_height().max(1) as f32;
+    let thumb_height = (area.height as f32 * visible).max(16.0);
+    let travel = area.height as f32 - thumb_height;
+    let progress = ui.scroll() as f32 / ui.max_scroll().max(1) as f32;
+
+    out.push(Instance::solid(
+        x,
+        area.y as f32 + travel * progress,
+        width,
+        thumb_height,
+        colors.convert_opaque(theme.bright.black),
+    ));
+}
+
 /// Centre a panel of the given size within `window`, clamped to fit.
 pub fn center_panel(window: Rect, width: u32, height: u32) -> Rect {
     let w = width.min(window.width);
