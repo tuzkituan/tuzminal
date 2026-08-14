@@ -32,7 +32,24 @@ sudo apt install libwayland-dev libxkbcommon-dev libfontconfig-1-dev libx11-dev
 sudo pacman -S wayland libxkbcommon fontconfig libx11
 ```
 
-### Install the terminal
+### From a release archive
+
+No Rust toolchain needed. Download the archive for your platform, then:
+
+```bash
+tar -xzf tuzminal-*-x86_64-linux.tar.gz
+cd tuzminal-*-x86_64-linux
+./install.sh
+```
+
+That puts the binary in `~/.local/bin` and registers the desktop entry. Verify the
+download first if you like — each archive ships with a `.sha256` beside it:
+
+```bash
+sha256sum -c tuzminal-*.tar.gz.sha256
+```
+
+### From source
 
 ```bash
 git clone https://github.com/tuzkituan/tuzminal
@@ -76,6 +93,15 @@ gsettings set org.gnome.desktop.default-applications.terminal exec tuzminal
 ---
 
 ## Uninstall
+
+If you installed from an archive, it came with an uninstaller:
+
+```bash
+./uninstall.sh            # the program
+./uninstall.sh --purge    # and your settings, themes and plugins
+```
+
+If you installed from source:
 
 ```bash
 cargo uninstall tuzminal
@@ -293,7 +319,14 @@ cargo test --workspace --features tuz-core/test-util   # 757 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
 cargo bench --workspace --features tuz-core/test-util   # VT parser throughput
+./scripts/package.sh                                    # a release archive in dist/
 ```
+
+`package.sh` strips the binary, which takes it from 167 MB to 25 MB — the release
+profile keeps debug symbols on purpose so perf profiles stay readable, and a
+download should not carry them. The archive holds the binary, the desktop entry and
+icon, the plugin guide, the example plugins, both licences, and install/uninstall
+scripts.
 
 CI builds and tests Linux, macOS and Windows on every push, plus clippy, rustfmt and
 `cargo audit`.

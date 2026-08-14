@@ -7,3 +7,6 @@
 perf.data*
 flamegraph.svg
 *.log
+
+# Release archives, produced by scripts/package.sh.
+dist/
