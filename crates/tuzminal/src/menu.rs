@@ -138,11 +138,16 @@ impl Menu {
             (self.anchor.y - height as i32).max(window.y)
         };
 
-        let x = self
-            .anchor
-            .x
-            .min(window.right() - width as i32)
-            .max(window.x);
+        // Right edge aligned with the button's, so the menu drops down and opens to the
+        // left. The toolbar packs from the right, so a menu that grew rightward from its
+        // button would immediately run off the window and get pushed back anyway — this
+        // makes the common case the intended one rather than the clamped one, and keeps
+        // the menu visually attached to the button it belongs to.
+        //
+        // Still clamped to the window: a button near the left edge would otherwise put
+        // the menu partly outside it. `width` is capped at the window width above, so the
+        // clamp range can never be empty.
+        let x = (self.anchor.right() - width as i32).clamp(window.x, window.right() - width as i32);
 
         Rect::new(x, y, width, height)
     }
@@ -191,11 +196,21 @@ mod tests {
     };
 
     #[test]
-    fn it_hangs_below_its_button() {
-        let m = menu(Rect::new(100, 0, 40, 40), 3);
+    fn it_hangs_below_its_button_and_opens_to_the_left() {
+        // Right edges aligned, so the menu drops down and grows leftward. The toolbar
+        // packs from the right, so growing rightward would run off the window and be
+        // clamped back — this makes the common case the intended one.
+        let anchor = Rect::new(300, 0, 40, 40);
+        let m = menu(anchor, 3);
         let rect = m.rect(WINDOW, CELL);
+
         assert_eq!(rect.y, 40, "directly under the button");
-        assert_eq!(rect.x, 100, "and aligned with its left edge");
+        assert_eq!(
+            rect.right(),
+            anchor.right(),
+            "right edges should line up so it opens leftward"
+        );
+        assert!(rect.x < anchor.x, "it should extend left of the button");
     }
 
     #[test]

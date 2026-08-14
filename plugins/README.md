@@ -2,7 +2,7 @@
 
 Every plugin that ships with Tuzminal lives here, one directory each. They are ordinary
 plugins — the same format anyone else writes, loaded through the same host, with no
-privileged path of their own. What makes these two special is only that they are
+privileged path of their own. What makes these special is only that they are
 compiled into the binary and written out on first launch, so a fresh install has working
 code to read rather than an empty page and a link to the docs.
 
@@ -10,6 +10,7 @@ code to read rather than an empty page and a link to the docs.
 |---|---|
 | [`clock/`](clock) | A tour of the API: a status segment, a keybinding, a command, a config-reload hook |
 | [`open-in-ide/`](open-in-ide) | Buttons in the status bar that open the working directory in VS Code, Cursor and friends |
+| [`suggest/`](suggest) | Ghost-text completions from your shell history. The plugin `input_line` and `set_inline_hint` were added for |
 
 **[../docs/PLUGINS.md](../docs/PLUGINS.md) is the guide to writing one.**
 

@@ -281,16 +281,21 @@ impl Widget {
             } else {
                 "[ ]".to_owned()
             }),
+            // Just the value. The `‹ ›` arrows used to be part of this string, which meant
+            // they were positioned by the value's alignment rather than by the halves of
+            // the column that `click` actually acts on — so the left arrow sat in the
+            // increment half. The renderer draws them at the ends of the value column
+            // instead, where each one falls inside the half it belongs to.
             Widget::Select { options, index, .. } => Some(
                 options
                     .get(*index)
-                    .map(|s| format!("‹ {s} ›"))
+                    .cloned()
                     // An empty option list is inert rather than a panic.
-                    .unwrap_or_else(|| "‹ — ›".to_owned()),
+                    .unwrap_or_else(|| "—".to_owned()),
             ),
             Widget::Stepper {
                 value, decimals, ..
-            } => Some(format!("‹ {value:.*} ›", *decimals as usize)),
+            } => Some(format!("{value:.*}", *decimals as usize)),
             Widget::Text {
                 value, placeholder, ..
             } => Some(if value.is_empty() {
@@ -1421,6 +1426,23 @@ mod tests {
     }
 
     #[test]
+    fn the_value_carries_no_arrows_of_its_own() {
+        // The arrows are the renderer's, drawn at the two ends of the value column so each
+        // sits inside the half that acts on it. While they were part of this string they
+        // were positioned by the value's right alignment, which put *both* of them in the
+        // increment half — clicking the visible `‹` made the number go up.
+        let ui = laid_out();
+        for placed in ui.placed() {
+            if let Some(value) = placed.widget.value_text() {
+                assert!(
+                    !value.contains('‹') && !value.contains('›'),
+                    "`{value}` carries its own arrows, so they cannot be placed by the hit regions"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn clicking_the_label_side_focuses_without_changing_the_value() {
         // A click meant to select a row must not also modify it.
         let mut ui = laid_out();
@@ -1463,10 +1485,10 @@ mod tests {
     #[test]
     fn stepper_values_display_with_the_requested_precision() {
         let integer = Widget::stepper(id(1), "Lines", 10000.0, 0.0..=1e6, 1000.0, 0);
-        assert_eq!(integer.value_text().unwrap(), "‹ 10000 ›");
+        assert_eq!(integer.value_text().unwrap(), "10000");
 
         let decimal = Widget::stepper(id(2), "Opacity", 0.95, 0.0..=1.0, 0.05, 2);
-        assert_eq!(decimal.value_text().unwrap(), "‹ 0.95 ›");
+        assert_eq!(decimal.value_text().unwrap(), "0.95");
     }
 
     // --- selects ----------------------------------------------------------
@@ -1513,7 +1535,7 @@ mod tests {
         ui.focus(id(1));
 
         assert_eq!(ui.key(UiKey::Right), KeyResponse::Consumed);
-        assert_eq!(ui.placed()[0].widget.value_text().unwrap(), "‹ — ›");
+        assert_eq!(ui.placed()[0].widget.value_text().unwrap(), "—");
     }
 
     #[test]

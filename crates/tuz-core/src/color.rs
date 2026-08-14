@@ -171,7 +171,9 @@ pub fn from_rgb(rgb: Rgb) -> Rgba {
 /// their background, which would make a suggestion invisible in exactly the themes
 /// people use.
 pub fn inline_hint_color(theme: &Theme) -> Rgba {
-    mix(theme.foreground, theme.background, 0.45)
+    // The same colour secondary text uses, and deliberately shared rather than
+    // reimplemented: ghost text *is* secondary text, and two definitions of "dim" drift.
+    theme.muted_foreground()
 }
 
 /// Linear interpolation in sRGB space.

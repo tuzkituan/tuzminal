@@ -11,7 +11,7 @@
 //! active tab uses the pane background so it reads as continuous with the terminal
 //! below it, and inactive tabs sit on the divider color so the strip recedes.
 
-use crate::instance::{ColorSpace, Instance};
+use crate::instance::{ColorSpace, Instance, FLAG_ROUND_ALL, RADIUS_CONTROL, RADIUS_PILL};
 use crate::text::{self, Align};
 use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
@@ -26,6 +26,68 @@ pub const PADDING: f32 = 8.0;
 
 /// Thickness of the bar marking the active tab.
 const ACTIVE_MARKER: u32 = 2;
+
+/// How far a coloured status segment is pulled in from the top and bottom of the bar,
+/// so it reads as a badge on the bar rather than a break in it.
+const SEGMENT_INSET: u32 = 3;
+
+/// Thickness of the rule separating the window controls from the app buttons.
+const DIVIDER_WIDTH: f32 = 1.0;
+
+/// Space left beside and above the active tab's shape.
+///
+/// Taken out of the tab rect when drawing rather than in `tab_rects`, so layout and
+/// hit-testing keep using whole, adjacent rects. The pointer therefore hits a slightly
+/// larger area than the shape it can see — the forgiving direction, and the same trade
+/// the menu's row highlight makes.
+///
+/// There is deliberately no bottom inset: see [`tab_pill`].
+const TAB_GAP: u32 = 3;
+const TAB_INSET: u32 = 4;
+
+/// How far a toolbar button's active indicator sits above the bottom of its slot.
+const MARKER_LIFT: u32 = 3;
+
+/// How far a toolbar button's hover fill is inset from its slot, so the fill reads as a
+/// key under the pointer rather than a block cut out of the strip.
+const BUTTON_INSET: u32 = 3;
+
+/// The shape drawn behind the active tab.
+///
+/// Inset at the sides and the top, but **not** at the bottom: it runs to the bottom of
+/// the strip so its fill meets the pane background below without a seam, which is the
+/// whole reason the active tab is painted in that colour. Only its top corners are
+/// rounded, for the same reason — a curve at the bottom would cut a notch out of the
+/// join.
+///
+/// Public so hover and hit-testing can agree with what is drawn if they ever need to;
+/// today only the renderer and its tests use it.
+pub fn tab_pill(tab: Rect) -> Rect {
+    Rect::new(
+        tab.x + TAB_GAP as i32,
+        tab.y + TAB_INSET as i32,
+        tab.width.saturating_sub(TAB_GAP * 2),
+        tab.height.saturating_sub(TAB_INSET),
+    )
+}
+
+/// A tab's close button: a square, centred against the tab's drawn shape.
+///
+/// Square because it holds an `×`, which is as tall as it is wide, and a slot that is not
+/// square puts the glyph off-centre inside its own fill. Centred on `shape` rather than on
+/// `slot` because the shape is inset at the top and flush at the bottom, so anything
+/// centred in the slot sits high inside the tab — the same correction the title makes.
+///
+/// Used for both the fill and the icon, so the two cannot drift apart.
+fn close_box(slot: Rect, shape: Rect) -> Rect {
+    let side = slot.width.min(slot.height);
+    Rect::new(
+        slot.x + (slot.width.saturating_sub(side) / 2) as i32,
+        shape.y + (shape.height.saturating_sub(side) / 2) as i32,
+        side,
+        side,
+    )
+}
 
 /// One tab to draw.
 pub struct TabLabel<'a> {
@@ -76,59 +138,47 @@ pub fn draw_tab_bar(
         crate::instance::FLAG_ROUND_TOP,
     ));
 
-    // A tab against the strip's left edge sits in the window's top-left corner, and
-    // as a plain rectangle it would paint the curve square again. Only that one
-    // corner is rounded — the other three meet neighbours, not the outside.
-    let corner_of = |rect: &Rect| {
-        if rect.x <= bar.x {
-            crate::instance::FLAG_ROUND_TL
-        } else {
-            0
-        }
-    };
-
     for (rect, label) in tabs.iter().zip(labels) {
-        // The active tab takes the pane background so it reads as continuous with
-        // the terminal below; inactive tabs stay on the strip color.
+        // Whatever the tab's title and close button sit on: the active tab's fill, or the
+        // bare strip for an inactive tab. Not drawn for an inactive tab — see below — but
+        // the close button still needs to know what colour it is over.
+        //
+        // `background`, not `background_focused()`: the active tab's shape runs into the
+        // pane below it, so the two have to be the *same* colour for the join to be
+        // invisible. `background_focused()` is a shade off on any theme that sets it, and
+        // that shade showed up as a seam exactly where the tab meets the terminal.
         let background = if label.active {
-            theme.background_focused()
+            theme.background
         } else {
             theme.split_divider()
         };
-        out.push(Instance::rounded(
-            rect.x as f32,
-            rect.y as f32,
-            rect.width as f32,
-            rect.height as f32,
-            colors.convert(background),
-            radius,
-            corner_of(rect),
-        ));
 
-        // A colored bar along the bottom of the active tab. Bottom rather than top
-        // so it sits against the panes it belongs to.
+        // Only the active tab is filled, and the fill *is* the marker.
+        //
+        // An inactive tab is just its title sitting on the strip: filling it in the
+        // strip's own colour would draw an invisible rectangle, and filling it in
+        // anything else would make every tab compete for attention. That also removes the
+        // need for a separator between tabs — the gap between two shapes is the
+        // separator, which is why the 1px rule that used to be drawn here is gone — and
+        // for the bar that used to underline the active title, which was only load-bearing
+        // while every tab was a full-height rectangle in nearly the same colour.
         if label.active {
-            out.push(Instance::solid(
-                rect.x as f32,
-                (rect.bottom() - ACTIVE_MARKER as i32) as f32,
-                rect.width as f32,
-                ACTIVE_MARKER as f32,
-                colors.convert_opaque(theme.cursor()),
-            ));
-        }
-
-        // A separator between inactive tabs, skipped for the active one so its
-        // background stays unbroken, and skipped at the strip's left edge where there
-        // is no tab to separate from. Drawing it there put a hard vertical stroke
-        // through the window's rounded top-left corner, which showed up as a stray
-        // mark sitting outside the curve.
-        if !label.active && rect.x > bar.x {
-            out.push(Instance::solid(
-                rect.x as f32,
-                rect.y as f32 + PADDING / 2.0,
-                1.0,
-                (rect.height as f32 - PADDING).max(1.0),
-                colors.convert(theme.normal.black),
+            let pill = tab_pill(*rect);
+            out.push(Instance::rounded(
+                pill.x as f32,
+                pill.y as f32,
+                pill.width as f32,
+                pill.height as f32,
+                colors.convert(background),
+                // A rounded rectangle, not a full pill. At the strip's height a true pill
+                // curves for most of the tab's short sides, which fights the straight run
+                // of text inside it; a control radius reads as a tab that has been
+                // softened rather than as a lozenge.
+                RADIUS_CONTROL,
+                // Top corners only. The shape runs to the bottom of the strip so its fill
+                // continues into the pane below it, and a rounded bottom would cut two
+                // notches out of that join.
+                crate::instance::FLAG_ROUND_TOP,
             ));
         }
 
@@ -144,10 +194,16 @@ pub fn draw_tab_bar(
         let foreground = if label.active || label.has_activity {
             theme.foreground
         } else {
-            theme.normal.white
+            theme.muted_foreground()
         };
 
-        let mut text_rect = *rect;
+        // Centred in the tab's *shape*, not its slot. The shape is inset at the top and
+        // flush at the bottom, so its centre sits below the slot's — a title centred in
+        // the slot reads as sitting high inside the tab it belongs to. Derived for every
+        // tab, active or not, so titles line up with each other as well as with the
+        // shape.
+        let shape = tab_pill(*rect);
+        let mut text_rect = Rect::new(rect.x, shape.y, rect.width, shape.height);
 
         // Room for the close button is reserved whether or not it is showing.
         //
@@ -161,12 +217,19 @@ pub fn draw_tab_bar(
             text_rect.width = text_rect.width.saturating_sub(shrink);
 
             if label.show_close && label.close_hovered {
-                out.push(Instance::solid(
-                    close.x as f32,
-                    close.y as f32,
-                    close.width as f32,
-                    close.height as f32,
+                // A rounded square, not a disc: it is the same kind of thing as a toolbar
+                // button, so it takes the same radius. A pill here made it the roundest
+                // element on the strip, which read as a stray dot rather than a control.
+                //
+                let box_ = close_box(*close, shape);
+                out.push(Instance::rounded(
+                    box_.x as f32,
+                    box_.y as f32,
+                    box_.width as f32,
+                    box_.height as f32,
                     colors.convert_opaque(theme.normal.red),
+                    RADIUS_CONTROL,
+                    FLAG_ROUND_ALL,
                 ));
             }
         }
@@ -180,11 +243,11 @@ pub fn draw_tab_bar(
             Align::Center,
             foreground,
             colors,
-            if label.active {
-                Style::Bold
-            } else {
-                Style::Regular
-            },
+            // Regular for every tab, including the active one. Bold was a second signal
+            // from when the active tab needed all the help it could get; now that it has
+            // its own shape in the pane's colour, the weight change only made the title
+            // wider than its neighbours' and shifted where it truncated.
+            Style::Regular,
         );
 
         if label.show_close {
@@ -192,11 +255,11 @@ pub fn draw_tab_bar(
                 crate::icon::draw(
                     out,
                     ChromeButton::Close,
-                    *close,
+                    close_box(*close, shape),
                     colors.convert_opaque(if label.close_hovered {
                         theme.background
                     } else {
-                        theme.bright.black
+                        theme.muted_foreground()
                     }),
                     colors.convert_opaque(if label.close_hovered {
                         theme.normal.red
@@ -223,8 +286,38 @@ pub fn draw_chrome_buttons(
     active: &[ChromeButton],
     theme: &Theme,
     colors: ColorSpace,
-    radius: f32,
 ) {
+    // A rule between the app buttons and the window controls, so close does not sit
+    // flush against settings. Placed midway through the gap that already exists between
+    // the two groups, so it needs no extra space and cannot shift any button.
+    //
+    // Drawn only when both groups are on the strip: with every app button collapsed into
+    // the menu there is nothing to separate, and a rule against the strip's left edge
+    // would look like a stray mark.
+    if let Some(first_control) = buttons
+        .iter()
+        .filter(|(b, _)| b.is_window_control())
+        .map(|(_, r)| r.x)
+        .min()
+    {
+        let last_app = buttons
+            .iter()
+            .filter(|(b, r)| !b.is_window_control() && r.right() <= first_control)
+            .map(|(_, r)| r.right())
+            .max();
+        if let Some(last_app) = last_app {
+            let x = (last_app + first_control) / 2;
+            let inset = (bar.height / 4).max(1);
+            out.push(Instance::solid(
+                x as f32,
+                (bar.y + inset as i32) as f32,
+                DIVIDER_WIDTH,
+                bar.height.saturating_sub(inset * 2) as f32,
+                colors.convert_opaque(theme.chrome_divider()),
+            ));
+        }
+    }
+
     for (button, rect) in buttons {
         let is_hovered = hovered == Some(*button);
         let is_pressed = pressed == Some(*button);
@@ -236,12 +329,21 @@ pub fn draw_chrome_buttons(
             theme.cursor()
         };
 
-        // Three states, most specific first. Pressed inverts — the strongest signal,
-        // and the one that makes a click feel like it landed rather than like the
-        // pointer merely passed over. Active is a quieter lit state that persists
-        // while the panel is open.
+        // Three states, most specific first. Pressed is the strongest, and the one that
+        // makes a click feel like it landed rather than like the pointer merely passed
+        // over. Active is a quieter lit state that persists while the panel is open.
+        //
+        // Pressed goes a step further than hover on the same neutral rather than flooding
+        // the button with the accent: the accent is what marks *state* on this strip — the
+        // active indicator, a focused control — and spending it on a transient press made
+        // every click read as "this is now selected". Close keeps its red, which is a
+        // warning rather than an accent.
         let (fill, tint) = if is_pressed {
-            (Some(accent), theme.background)
+            if *button == ChromeButton::Close {
+                (Some(theme.normal.red), theme.background)
+            } else {
+                (Some(theme.chrome_divider()), theme.foreground)
+            }
         } else if is_hovered {
             (
                 Some(if *button == ChromeButton::Close {
@@ -263,31 +365,47 @@ pub fn draw_chrome_buttons(
 
         let background = fill.unwrap_or_else(|| theme.split_divider());
         if let Some(fill) = fill {
+            // Rounded on all four corners and inset from the strip, so hover and press
+            // read as a key under the pointer rather than as a block of colour cut out
+            // of the toolbar. This used to pass a radius with no corner flags for every
+            // button except the one in the window's corner, so the radius did nothing.
+            //
+            // The button in the corner still keeps the window's own larger radius on that
+            // one corner: it paints the pixels the window curve occupies, and a smaller
+            // radius there would square the curve off.
+            // Every button, including the one in the window's corner, gets the same inset
+            // and the same radius. The corner used to be special-cased to the window's own
+            // radius so its fill would not square off the curve — but an inset fill never
+            // reaches the corner, and the strip beneath it already carries the curve. The
+            // exception only made close visibly larger than its neighbours.
+            let box_ = rect.inset(BUTTON_INSET, BUTTON_INSET);
             out.push(Instance::rounded(
-                rect.x as f32,
-                rect.y as f32,
-                rect.width as f32,
-                rect.height as f32,
+                box_.x as f32,
+                box_.y as f32,
+                box_.width as f32,
+                box_.height as f32,
                 colors.convert_opaque(fill),
-                radius,
-                if rect.right() >= bar.right() {
-                    crate::instance::FLAG_ROUND_TR
-                } else {
-                    0
-                },
+                RADIUS_CONTROL,
+                FLAG_ROUND_ALL,
             ));
         }
 
-        // A rule under an active button, the way the active tab is marked. It survives
-        // hover, so moving the pointer away does not make the toolbar forget which
-        // panel is open.
+        // The mark on a button whose panel is open. It survives hover, so moving the
+        // pointer away does not make the toolbar forget which panel is showing.
+        //
+        // A short rounded indicator rather than a full-width bar, matching the active
+        // tab: a square bar along the bottom edge would poke out through the rounded
+        // fill above it.
         if is_active && !is_pressed {
-            out.push(Instance::solid(
-                rect.x as f32,
-                (rect.bottom() - ACTIVE_MARKER as i32) as f32,
-                rect.width as f32,
+            let width = (rect.width / 3).max(1);
+            out.push(Instance::rounded(
+                (rect.x + (rect.width.saturating_sub(width) / 2) as i32) as f32,
+                (rect.bottom() - (ACTIVE_MARKER + MARKER_LIFT) as i32) as f32,
+                width as f32,
                 ACTIVE_MARKER as f32,
                 colors.convert_opaque(accent),
+                RADIUS_PILL,
+                FLAG_ROUND_ALL,
             ));
         }
 
@@ -362,12 +480,18 @@ pub fn draw_status_bar(
         let segment = Rect::new(left as i32, bar.y, width as u32, bar.height);
 
         if let Some(background) = item.background.and_then(parse_color) {
-            out.push(Instance::solid(
-                segment.x as f32,
-                segment.y as f32,
-                segment.width as f32,
-                segment.height as f32,
+            // A pill, and inset vertically so it does not fill the bar's full height: a
+            // coloured segment reaching both edges reads as a break in the bar rather
+            // than as a badge sitting on it.
+            let pill = segment.inset(0, SEGMENT_INSET);
+            out.push(Instance::rounded(
+                pill.x as f32,
+                pill.y as f32,
+                pill.width as f32,
+                pill.height as f32,
                 colors.convert(background),
+                RADIUS_PILL,
+                FLAG_ROUND_ALL,
             ));
         }
 
@@ -408,12 +532,18 @@ pub fn draw_status_bar(
         let segment = Rect::new(pen as i32, bar.y, width as u32, bar.height);
 
         if let Some(background) = item.background.and_then(parse_color) {
-            out.push(Instance::solid(
-                segment.x as f32,
-                segment.y as f32,
-                segment.width as f32,
-                segment.height as f32,
+            // A pill, and inset vertically so it does not fill the bar's full height: a
+            // coloured segment reaching both edges reads as a break in the bar rather
+            // than as a badge sitting on it.
+            let pill = segment.inset(0, SEGMENT_INSET);
+            out.push(Instance::rounded(
+                pill.x as f32,
+                pill.y as f32,
+                pill.width as f32,
+                pill.height as f32,
                 colors.convert(background),
+                RADIUS_PILL,
+                FLAG_ROUND_ALL,
             ));
         }
 
@@ -489,21 +619,28 @@ pub fn draw_tooltip(
         return;
     }
 
+    // Border then interior, rounded like the menu: both float over the terminal, and two
+    // floating surfaces with different corners read as two different UIs. The interior's
+    // radius steps down by the border width so the curves stay concentric.
     let rect = Rect::new(x, y, width, height);
-    out.push(Instance::solid(
+    out.push(Instance::rounded(
         rect.x as f32,
         rect.y as f32,
         rect.width as f32,
         rect.height as f32,
         colors.convert_opaque(theme.split_divider()),
+        RADIUS_CONTROL,
+        FLAG_ROUND_ALL,
     ));
     let inner = rect.inset(1, 1);
-    out.push(Instance::solid(
+    out.push(Instance::rounded(
         inner.x as f32,
         inner.y as f32,
         inner.width as f32,
         inner.height as f32,
         colors.convert_opaque(theme.background_focused()),
+        RADIUS_CONTROL - 1.0,
+        FLAG_ROUND_ALL,
     ));
 
     // With a shortcut the label goes left and the chord right, so the two line up as
@@ -540,7 +677,7 @@ pub fn draw_tooltip(
             rect,
             PADDING,
             Align::Right,
-            theme.normal.white,
+            theme.muted_foreground(),
             colors,
             Style::Regular,
         );
@@ -850,24 +987,32 @@ mod tests {
 
         // The active tab's background is the focused pane background, so the strip
         // reads as continuous with the terminal below it.
-        let active_bg = colors().convert(theme.background_focused());
+        let active_bg = colors().convert(theme.background);
         assert!(
             out.iter()
                 .any(|i| i.flags & crate::FLAG_TEXTURED == 0 && i.color == active_bg),
-            "the active tab should use the focused pane background"
+            "the active tab should use the pane background it runs into"
         );
 
-        // And it carries the marker bar in the cursor color.
-        let marker = colors().convert_opaque(theme.cursor());
+        // And it is a pill inset from its slot, not a full-height rectangle: the inset is
+        // what leaves a gap between tabs, which is what replaced the separator rule and
+        // the underline bar.
+        let pill = tab_pill(tabs[0]);
         assert!(
-            out.iter()
-                .any(|i| i.flags == 0 && i.color == marker && i.size[1] == ACTIVE_MARKER as f32),
-            "the active tab should have a marker bar"
+            out.iter().any(|i| i.flags & crate::FLAG_TEXTURED == 0
+                && i.color == active_bg
+                && i.size[0] == pill.width as f32
+                && i.size[1] == pill.height as f32),
+            "the active tab's fill should be the inset pill"
+        );
+        assert!(
+            pill.height < tabs[0].height,
+            "the pill must be shorter than its slot to leave a gap"
         );
     }
 
     #[test]
-    fn only_one_tab_gets_the_active_marker() {
+    fn only_one_tab_is_filled() {
         let theme = Theme::builtin_default();
         let mut fonts = fonts();
         let tabs = tuz_layout::tab_rects(bar(), 4, 180, 60);
@@ -885,12 +1030,19 @@ mod tests {
             0.0,
         );
 
-        let marker = colors().convert_opaque(theme.cursor());
-        let markers = out
+        // The fill is the only thing saying which tab is active, so exactly one tab may
+        // have it — with four tabs drawn and the third active.
+        let active_bg = colors().convert(theme.background);
+        let pill = tab_pill(tabs[0]);
+        let fills = out
             .iter()
-            .filter(|i| i.flags == 0 && i.color == marker && i.size[1] == ACTIVE_MARKER as f32)
+            .filter(|i| {
+                i.flags & crate::FLAG_TEXTURED == 0
+                    && i.color == active_bg
+                    && i.size[1] == pill.height as f32
+            })
             .count();
-        assert_eq!(markers, 1, "exactly one tab is active");
+        assert_eq!(fills, 1, "exactly one tab is filled");
     }
 
     #[test]
@@ -977,7 +1129,7 @@ mod tests {
         // Whatever the dim slot is, not a specific colour: the point is that an
         // idle tab recedes and a busy one does not, and pinning the exact shade here
         // made the test fail when the shade was made readable.
-        let dim = colors().convert_opaque(theme.normal.white);
+        let dim = colors().convert_opaque(theme.muted_foreground());
         let lit = colors().convert_opaque(theme.foreground);
         let count = |out: &[Instance], color: [f32; 4]| {
             out.iter()
@@ -1144,7 +1296,8 @@ mod tests {
 
         let green = colors().convert(Rgba::rgb(0, 255, 0));
         assert!(
-            out.iter().any(|i| i.flags == 0 && i.color == green),
+            out.iter()
+                .any(|i| i.flags & crate::FLAG_TEXTURED == 0 && i.color == green),
             "the segment background should use the plugin's color"
         );
     }
@@ -1340,7 +1493,6 @@ mod tests {
             active,
             &Theme::builtin_default(),
             colors(),
-            0.0,
         );
         out
     }
@@ -1356,9 +1508,18 @@ mod tests {
     #[test]
     fn hover_press_and_active_are_three_different_looks() {
         let theme = Theme::builtin_default();
+        // The largest untextured quad is the button's fill: the icon is drawn from small
+        // pieces of geometry and the active indicator is a sliver. Matching on the exact
+        // slot size broke when the fill was inset from its slot, which is a change in how
+        // it looks and not in which colour it is — the thing this test is about.
         let fill_of = |out: &[Instance]| {
             out.iter()
-                .find(|i| i.size[0] == 40.0 && i.size[1] == 40.0)
+                .filter(|i| i.flags & crate::FLAG_TEXTURED == 0)
+                .max_by(|a, b| {
+                    (a.size[0] * a.size[1])
+                        .partial_cmp(&(b.size[0] * b.size[1]))
+                        .expect("instance sizes are finite")
+                })
                 .map(|i| i.color)
         };
 
@@ -1374,10 +1535,18 @@ mod tests {
         // Pressed has to differ from hover, or a click gives no feedback at all: the
         // pointer is already over the button when you press it.
         assert_ne!(hover, press, "a press must look different from a hover");
-        assert_eq!(
+        // And it must not be the accent. The accent marks state on this strip — the active
+        // indicator, a focused control — so spending it on a transient press made every
+        // click read as "this is now selected".
+        assert_ne!(
             press,
             Some(colors().convert_opaque(theme.cursor())),
-            "pressed inverts to the accent color"
+            "a press must not use the accent color"
+        );
+        assert_eq!(
+            press,
+            Some(colors().convert_opaque(theme.chrome_divider())),
+            "a press is a step further than hover on the same neutral"
         );
     }
 
@@ -1406,7 +1575,6 @@ mod tests {
             &[],
             &Theme::builtin_default(),
             colors(),
-            0.0,
         );
         let red = colors().convert_opaque(Theme::builtin_default().normal.red);
         assert!(

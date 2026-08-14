@@ -792,9 +792,10 @@ fn the_tab_bar_draws_a_strip_with_a_distinguished_active_tab() {
 
     let mid_y = bar.height / 2;
 
-    // The active tab uses the focused pane background.
-    let active = pixel(&pixels, tabs[0].x as u32 + 4, mid_y);
-    let expected = theme.background_focused();
+    // The active tab is painted in the pane background it runs into, so the join between
+    // the tab and the terminal below it is seamless.
+    let active = pixel(&pixels, tabs[0].x as u32 + 8, mid_y);
+    let expected = theme.background;
     let diff = (active[0] as i32 - expected.r as i32).abs()
         + (active[1] as i32 - expected.g as i32).abs()
         + (active[2] as i32 - expected.b as i32).abs();
@@ -810,15 +811,18 @@ fn the_tab_bar_draws_a_strip_with_a_distinguished_active_tab() {
         "the active and inactive tabs must be distinguishable"
     );
 
-    // The marker bar sits along the bottom edge of the active tab.
-    let marker = pixel(&pixels, tabs[0].x as u32 + 4, bar.height - 1);
-    let cursor = theme.cursor();
-    let marker_diff = (marker[0] as i32 - cursor.r as i32).abs()
-        + (marker[1] as i32 - cursor.g as i32).abs()
-        + (marker[2] as i32 - cursor.b as i32).abs();
+    // The fill is inset from the tab's slot, which is what leaves a gap between tabs.
+    // Sampled just above the pill's top edge: that band belongs to the strip, so it must
+    // still be the strip's colour even though the tab below it is filled.
+    let pill = tuz_render::tab_pill(tabs[0]);
+    let strip = theme.split_divider();
+    let above = pixel(&pixels, pill.center_x() as u32, (pill.y - 2) as u32);
+    let strip_diff = (above[0] as i32 - strip.r as i32).abs()
+        + (above[1] as i32 - strip.g as i32).abs()
+        + (above[2] as i32 - strip.b as i32).abs();
     assert!(
-        marker_diff < 24,
-        "expected the active marker in the cursor color {cursor:?}, got {marker:?}"
+        strip_diff < 12,
+        "the band above the pill should still be the strip {strip:?}, got {above:?}"
     );
 
     // Titles were rasterized.

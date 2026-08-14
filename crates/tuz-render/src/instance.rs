@@ -28,6 +28,30 @@ pub const FLAG_ROUND_BR: u32 = 32;
 pub const FLAG_ROUND_TOP: u32 = FLAG_ROUND_TL | FLAG_ROUND_TR;
 /// Both bottom corners.
 pub const FLAG_ROUND_BOTTOM: u32 = FLAG_ROUND_BL | FLAG_ROUND_BR;
+/// All four corners.
+pub const FLAG_ROUND_ALL: u32 = FLAG_ROUND_TOP | FLAG_ROUND_BOTTOM;
+
+/// Corner radius for a **surface**: a menu, a toast, a page or panel — something that
+/// floats above what is behind it.
+///
+/// Two radii rather than one per widget, because a radius is what tells a reader how
+/// far from the background a thing is meant to sit. Surfaces get the larger one, the
+/// controls inside them the smaller; picking a third for each new element is how a UI
+/// stops looking like one system.
+pub const RADIUS_SURFACE: f32 = 7.0;
+
+/// Corner radius for a **control**: a button, a field, a selected row.
+///
+/// Smaller than [`RADIUS_SURFACE`] on purpose. A control with the same radius as the
+/// panel it sits in reads as floating loose inside it.
+pub const RADIUS_CONTROL: f32 = 4.0;
+
+/// A fully rounded end, for tracks and thumbs.
+///
+/// `Instance::rounded` clamps the radius to half the shorter side, so any number this
+/// large produces a pill of whatever height it is given, and the caller does not have to
+/// know the height to ask for one.
+pub const RADIUS_PILL: f32 = f32::MAX;
 /// Draw only a band of `stroke_width` inside the edge, leaving the middle untouched.
 ///
 /// A filled quad cannot be an outline drawn last, and an outline has to be drawn last

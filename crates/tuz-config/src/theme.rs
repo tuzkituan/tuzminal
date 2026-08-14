@@ -157,6 +157,51 @@ impl Theme {
         })
     }
 
+    /// Secondary text and quiet UI furniture: a shortcut hint, an unfocused tab's title,
+    /// a placeholder, a scrollbar thumb.
+    ///
+    /// Derived, and this is the third attempt at it — the first two were palette slots and
+    /// both were wrong for half the themes that exist. `bright.black` is the chrome's own
+    /// grey, so anything drawn in it vanished against the strip. `normal.white` fixed that
+    /// on dark themes and broke it completely on light ones, where near-white text on a
+    /// white page is invisible.
+    ///
+    /// A palette slot cannot work, because "dim" is not a colour — it is a *relationship*
+    /// to the background, and which direction that runs is exactly what a light and a dark
+    /// theme disagree about. Blending the foreground toward the background is the only
+    /// definition that holds in both, the same reasoning [`Theme::window_border`] uses.
+    pub fn muted_foreground(&self) -> Rgba {
+        let t = 0.45;
+        let step = |fg: u8, bg: u8| (fg as f32 + (bg as f32 - fg as f32) * t).round() as u8;
+        Rgba::rgb(
+            step(self.foreground.r, self.background.r),
+            step(self.foreground.g, self.background.g),
+            step(self.foreground.b, self.background.b),
+        )
+    }
+
+    /// A rule separating groups of controls inside the toolbar strip.
+    ///
+    /// Cannot be [`Theme::split_divider`], despite the name: that colour *is* the
+    /// strip's own background, so a rule painted in it is invisible. Derived from the
+    /// strip toward the foreground for the same reason [`Theme::window_border`] is —
+    /// the direction has to reverse between a dark theme and a light one, and only the
+    /// theme's own foreground knows which way that is.
+    ///
+    /// A third of the way rather than a fifth: this sits on the strip's colour rather
+    /// than on the window background, and the two are close enough that a fifth does
+    /// not separate anything.
+    pub fn chrome_divider(&self) -> Rgba {
+        let strip = self.split_divider();
+        let t = 0.33;
+        let step = |bg: u8, fg: u8| (bg as f32 + (fg as f32 - bg as f32) * t).round() as u8;
+        Rgba::rgb(
+            step(strip.r, self.foreground.r),
+            step(strip.g, self.foreground.g),
+            step(strip.b, self.foreground.b),
+        )
+    }
+
     /// Resolve any of the 256 indexed colors.
     ///
     /// 0-15 come from the ANSI palettes, 16-231 from the 6x6x6 cube, and
@@ -327,6 +372,54 @@ mod tests {
             assert_eq!(
                 &theme.name, name,
                 "theme `{name}` declares a mismatched name"
+            );
+        }
+    }
+
+    /// Per-channel distance, which is what "visibly different" means for these colours.
+    fn distance(a: Rgba, b: Rgba) -> i32 {
+        (a.r as i32 - b.r as i32).abs()
+            + (a.g as i32 - b.g as i32).abs()
+            + (a.b as i32 - b.b as i32).abs()
+    }
+
+    #[test]
+    fn secondary_text_is_legible_on_every_bundled_theme() {
+        // The bug this exists to prevent: `muted_foreground` was a palette slot twice, and
+        // both choices vanished on half the themes — `bright.black` against the chrome's
+        // own grey, then `normal.white` against a light theme's white page. Asserted across
+        // every bundled theme, light ones included, because one theme passing proves
+        // nothing about the direction the blend runs.
+        for (name, src) in BUILTIN_THEMES {
+            let theme = Theme::parse(src, name).expect("bundled themes parse");
+            let muted = theme.muted_foreground();
+
+            // Far enough from the background to be read at all...
+            let from_bg = distance(muted, theme.background);
+            assert!(
+                from_bg > 60,
+                "`{name}`: secondary text is {from_bg} from its background, so it is invisible"
+            );
+            // ...and far enough from the foreground to read as secondary rather than as
+            // ordinary text someone forgot to style.
+            let from_fg = distance(muted, theme.foreground);
+            assert!(
+                from_fg > 60,
+                "`{name}`: secondary text is only {from_fg} from the foreground"
+            );
+        }
+    }
+
+    #[test]
+    fn the_toolbar_divider_is_visible_against_the_strip_it_sits_on() {
+        // `split_divider` *is* the strip's background, so a rule painted in it would be
+        // invisible — the trap this accessor exists to avoid.
+        for (name, src) in BUILTIN_THEMES {
+            let theme = Theme::parse(src, name).expect("bundled themes parse");
+            let apart = distance(theme.chrome_divider(), theme.split_divider());
+            assert!(
+                apart > 30,
+                "`{name}`: the divider is {apart} from the strip behind it"
             );
         }
     }

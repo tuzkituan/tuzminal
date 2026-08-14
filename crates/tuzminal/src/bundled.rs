@@ -16,7 +16,7 @@ type Files = &'static [(&'static str, &'static str)];
 
 /// Every bundled plugin, as `(name, files)`.
 ///
-/// `include_str!` rather than a build script: two small Lua files do not justify one,
+/// `include_str!` rather than a build script: a handful of small Lua files do not justify one,
 /// and this way the plugins in the repository and the ones installed are provably the
 /// same text.
 const BUNDLED: &[(&str, Files)] = &[

@@ -7,7 +7,10 @@
 //! Every color comes from the theme. A panel with hardcoded colors is the fastest
 //! way to look broken the moment someone switches theme, and this terminal ships two.
 
-use crate::instance::{ColorSpace, Instance};
+use crate::instance::{
+    ColorSpace, Instance, FLAG_ROUND_ALL, FLAG_ROUND_BL, FLAG_ROUND_TL, RADIUS_CONTROL,
+    RADIUS_PILL, RADIUS_SURFACE,
+};
 use crate::text::{self, Align};
 use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
@@ -20,6 +23,14 @@ const PADDING: f32 = 8.0;
 /// Thickness of the panel border and the focus ring.
 const BORDER: f32 = 1.0;
 const FOCUS_RING: f32 = 2.0;
+
+/// How far a menu row's highlight is pulled in from the menu's own border.
+///
+/// A highlight running flush into a rounded border makes the curve look like a bug on
+/// the first and last rows. Only the menu does this: a menu row is hit-tested across its
+/// full width, so the inset costs nothing, whereas insetting a settings row would put a
+/// button's visible box inside the area that responds to a press.
+const HIGHLIGHT_INSET: i32 = 4;
 
 /// Draw the panel frame: a dimming layer over the terminal, then the panel itself.
 ///
@@ -132,21 +143,29 @@ pub fn draw_menu(
     theme: &Theme,
     colors: ColorSpace,
 ) {
-    // Border then interior, the same two-quad outline the panel frame uses.
-    out.push(Instance::solid(
+    // Border then interior, the same two-quad outline the panel frame uses — rounded,
+    // because a dropdown is a surface floating over the terminal and a square one reads
+    // as part of the grid behind it. The interior's radius is stepped down by the border
+    // width so the two curves stay concentric instead of the border thinning at the
+    // corners.
+    out.push(Instance::rounded(
         rect.x as f32,
         rect.y as f32,
         rect.width as f32,
         rect.height as f32,
         colors.convert_opaque(theme.split_divider()),
+        RADIUS_SURFACE,
+        FLAG_ROUND_ALL,
     ));
     let inner = rect.inset(BORDER as u32, BORDER as u32);
-    out.push(Instance::solid(
+    out.push(Instance::rounded(
         inner.x as f32,
         inner.y as f32,
         inner.width as f32,
         inner.height as f32,
         colors.convert_opaque(theme.background_focused()),
+        RADIUS_SURFACE - BORDER,
+        FLAG_ROUND_ALL,
     ));
 
     let cell = fonts.metrics();
@@ -160,12 +179,24 @@ pub fn draw_menu(
             theme.background_focused()
         };
         if highlighted {
-            out.push(Instance::solid(
-                row.rect.x as f32,
-                row.rect.y as f32,
-                row.rect.width as f32,
-                row.rect.height as f32,
+            // Inset horizontally so the highlight floats inside the menu rather than
+            // running into its border, and rounded to match the other controls. A
+            // highlight that touches the edge makes the rounded corner look like a
+            // mistake on the first and last rows.
+            let fill = Rect::new(
+                row.rect.x + HIGHLIGHT_INSET,
+                row.rect.y,
+                row.rect.width.saturating_sub(HIGHLIGHT_INSET as u32 * 2),
+                row.rect.height,
+            );
+            out.push(Instance::rounded(
+                fill.x as f32,
+                fill.y as f32,
+                fill.width as f32,
+                fill.height as f32,
                 colors.convert_opaque(row_background),
+                RADIUS_CONTROL,
+                FLAG_ROUND_ALL,
             ));
         }
 
@@ -188,10 +219,14 @@ pub fn draw_menu(
                 side,
             );
             if let Some(button) = row.icon {
-                crate::icon::draw(
+                // A menu row's icon box is one cell, where a toolbar button's is the
+                // whole strip height — so the toolbar's fraction of that box would draw
+                // an icon a third the size, next to text at full size.
+                crate::icon::draw_scaled(
                     out,
                     button,
                     icon_rect,
+                    crate::icon::MENU_ICON_SCALE,
                     colors.convert(foreground),
                     colors.convert(row_background),
                 );
@@ -232,7 +267,7 @@ pub fn draw_menu(
                 if highlighted {
                     theme.background
                 } else {
-                    theme.normal.white
+                    theme.muted_foreground()
                 },
                 colors,
                 Style::Regular,
@@ -404,11 +439,8 @@ fn draw_row_background(
     // hover highlight both sit on top of it. This is what makes an arrow keypress
     // visible: without it the selection moves and the list looks unchanged.
     if let Widget::Entry { selected: true, .. } = placed.widget {
-        out.push(Instance::solid(
-            placed.rect.x as f32,
-            placed.rect.y as f32,
-            placed.rect.width as f32,
-            placed.rect.height as f32,
+        out.push(row_highlight(
+            placed.rect,
             colors.convert_opaque(theme.background_focused()),
         ));
     }
@@ -421,44 +453,26 @@ fn draw_row_background(
     // field the outer one encircles the label too, which reads as a mistake. The
     // field's own border carries the focus color instead.
     if focused && !matches!(placed.widget, Widget::Text { .. }) {
-        let ring = colors.convert_opaque(theme.cursor());
+        // One `Instance::ring` rather than four edge quads. Four rectangles cannot
+        // follow a corner curve — they would leave the corners square while the fill
+        // inside them is round — and the ring is cut from the same distance field, so it
+        // tracks the radius for free. Four quads become one, too.
         let r = placed.rect;
-        out.push(Instance::solid(
+        out.push(Instance::ring(
             r.x as f32,
             r.y as f32,
             r.width as f32,
-            FOCUS_RING,
-            ring,
-        ));
-        out.push(Instance::solid(
-            r.x as f32,
-            r.bottom() as f32 - FOCUS_RING,
-            r.width as f32,
-            FOCUS_RING,
-            ring,
-        ));
-        out.push(Instance::solid(
-            r.x as f32,
-            r.y as f32,
-            FOCUS_RING,
             r.height as f32,
-            ring,
-        ));
-        out.push(Instance::solid(
-            r.right() as f32 - FOCUS_RING,
-            r.y as f32,
+            colors.convert_opaque(theme.cursor()),
+            RADIUS_CONTROL,
+            FLAG_ROUND_ALL,
             FOCUS_RING,
-            r.height as f32,
-            ring,
         ));
     }
 
     if hovered {
-        out.push(Instance::solid(
-            placed.rect.x as f32,
-            placed.rect.y as f32,
-            placed.rect.width as f32,
-            placed.rect.height as f32,
+        out.push(row_highlight(
+            placed.rect,
             colors.convert_opaque(theme.background_focused()),
         ));
     }
@@ -467,7 +481,7 @@ fn draw_row_background(
     // someone forgot to make a control.
     if let Widget::Text { .. } = placed.widget {
         let r = placed.value_rect;
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             r.x as f32,
             r.y as f32,
             r.width as f32,
@@ -479,14 +493,18 @@ fn draw_row_background(
             } else {
                 theme.split_divider()
             }),
+            RADIUS_CONTROL,
+            FLAG_ROUND_ALL,
         ));
         let inner = r.inset(BORDER as u32, BORDER as u32);
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             inner.x as f32,
             inner.y as f32,
             inner.width as f32,
             inner.height as f32,
             colors.convert_opaque(theme.background),
+            RADIUS_CONTROL - BORDER,
+            FLAG_ROUND_ALL,
         ));
     }
 
@@ -494,15 +512,17 @@ fn draw_row_background(
     // not. Disabled buttons get the box too, just dimmed by their text color.
     if let Widget::Button { .. } = placed.widget {
         let r = button_rect(placed);
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             r.x as f32,
             r.y as f32,
             r.width as f32,
             r.height as f32,
             colors.convert_opaque(theme.split_divider()),
+            RADIUS_CONTROL,
+            FLAG_ROUND_ALL,
         ));
         let inner = r.inset(BORDER as u32, BORDER as u32);
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             inner.x as f32,
             inner.y as f32,
             inner.width as f32,
@@ -516,8 +536,28 @@ fn draw_row_background(
             } else {
                 theme.background
             }),
+            RADIUS_CONTROL - BORDER,
+            FLAG_ROUND_ALL,
         ));
     }
+}
+
+/// A rounded fill behind one row — selection and hover both use it, so the two cannot
+/// drift apart in shape.
+///
+/// Drawn at the row's own rect, not inset. A button's box has to be exactly the rect
+/// hit-testing uses (see [`button_rect`]), and a highlight narrower than the row it
+/// belongs to would reintroduce the same see-one-thing-press-another mismatch.
+fn row_highlight(row: Rect, color: [f32; 4]) -> Instance {
+    Instance::rounded(
+        row.x as f32,
+        row.y as f32,
+        row.width as f32,
+        row.height as f32,
+        color,
+        RADIUS_CONTROL,
+        FLAG_ROUND_ALL,
+    )
 }
 
 /// Buttons occupy the value column rather than the whole row, so a row of them does
@@ -588,7 +628,7 @@ fn draw_row_text(
                 placed.rect,
                 PADDING,
                 Align::Right,
-                theme.bright.black,
+                theme.muted_foreground(),
                 colors,
                 Style::Regular,
             );
@@ -617,7 +657,7 @@ fn draw_row_text(
                 colors.convert_opaque(match kind {
                     EntryKind::Directory | EntryKind::Parent => theme.cursor(),
                     EntryKind::Symlink => theme.normal.cyan,
-                    EntryKind::File => theme.bright.black,
+                    EntryKind::File => theme.muted_foreground(),
                 }),
             );
 
@@ -654,7 +694,7 @@ fn draw_row_text(
                     placed.rect,
                     PADDING,
                     Align::Right,
-                    theme.bright.black,
+                    theme.muted_foreground(),
                     colors,
                     Style::Regular,
                 );
@@ -678,7 +718,7 @@ fn draw_row_text(
                 } else {
                     // Dimmed rather than hidden: a disabled button should still say
                     // what it would do.
-                    theme.bright.black
+                    theme.muted_foreground()
                 },
                 colors,
                 Style::Regular,
@@ -727,7 +767,7 @@ fn draw_row_text(
                 Align::Left,
                 if value.is_empty() {
                     // A placeholder that looks like a value is worse than none.
-                    theme.bright.black
+                    theme.muted_foreground()
                 } else {
                     theme.foreground
                 },
@@ -774,19 +814,79 @@ fn draw_row_text(
             );
 
             if let Some(value) = placed.widget.value_text() {
-                text::draw_in_box(
-                    out,
-                    fonts,
-                    &value,
-                    placed.value_rect,
-                    PADDING,
-                    Align::Right,
-                    // Values in the cursor color so the editable part of each row is
-                    // obvious at a glance.
-                    theme.cursor(),
-                    colors,
-                    Style::Regular,
-                );
+                // Values in the cursor color so the editable part of each row is obvious
+                // at a glance.
+                let accent = theme.cursor();
+                let vr = placed.value_rect;
+
+                if matches!(
+                    placed.widget,
+                    Widget::Select { .. } | Widget::Stepper { .. }
+                ) {
+                    // The arrows go at the two ends of the value column, and the value
+                    // between them.
+                    //
+                    // They used to be part of the value string and right-aligned with it,
+                    // which put *both* of them in the right-hand half of a column twelve
+                    // cells wide. `Ui::click` decides direction by which half was hit — so
+                    // clicking the visible `‹` incremented, and decrementing meant clicking
+                    // empty space well to its left. Anchoring each arrow inside the half it
+                    // acts on is what makes the control mean what it looks like.
+                    let arrow = fonts.metrics().width as f32 + PADDING;
+                    text::draw_in_box(
+                        out,
+                        fonts,
+                        "‹",
+                        vr,
+                        PADDING,
+                        Align::Left,
+                        accent,
+                        colors,
+                        Style::Regular,
+                    );
+                    text::draw_in_box(
+                        out,
+                        fonts,
+                        "›",
+                        vr,
+                        PADDING,
+                        Align::Right,
+                        accent,
+                        colors,
+                        Style::Regular,
+                    );
+                    // Inset by an arrow column on each side, so a long value truncates
+                    // before it reaches an arrow rather than drawing over one.
+                    let inner = Rect::new(
+                        vr.x + arrow as i32,
+                        vr.y,
+                        vr.width.saturating_sub(arrow as u32 * 2),
+                        vr.height,
+                    );
+                    text::draw_in_box(
+                        out,
+                        fonts,
+                        &value,
+                        inner,
+                        PADDING,
+                        Align::Center,
+                        accent,
+                        colors,
+                        Style::Regular,
+                    );
+                } else {
+                    text::draw_in_box(
+                        out,
+                        fonts,
+                        &value,
+                        vr,
+                        PADDING,
+                        Align::Right,
+                        accent,
+                        colors,
+                        Style::Regular,
+                    );
+                }
             }
         }
     }
@@ -843,21 +943,29 @@ pub fn draw_toasts(
             c
         };
 
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             rect.x as f32,
             rect.y as f32,
             rect.width as f32,
             rect.height as f32,
             fade(colors.convert_opaque(theme.background_focused())),
+            RADIUS_SURFACE,
+            FLAG_ROUND_ALL,
         ));
         // Accent stripe down the left edge, which is how the severity reads at a
         // glance without colouring the whole box.
-        out.push(Instance::solid(
+        //
+        // Only its left corners are rounded: the right edge butts against the toast's
+        // interior, and rounding it there would leave two thin wedges of background
+        // showing through the middle of the box.
+        out.push(Instance::rounded(
             rect.x as f32,
             rect.y as f32,
             accent_width,
             rect.height as f32,
             fade(colors.convert_opaque(toast.accent)),
+            RADIUS_SURFACE,
+            FLAG_ROUND_TL | FLAG_ROUND_BL,
         ));
 
         let text_rect = Rect::new(
@@ -913,13 +1021,16 @@ pub fn draw_scrollbar(
     let width = 4.0;
     let x = area.right() as f32 - width;
 
-    // Track.
-    out.push(Instance::solid(
+    // Track. A pill rather than a bar: at four pixels wide the radius is two, which is
+    // enough to stop it reading as a hairline rule down the edge of the page.
+    out.push(Instance::rounded(
         x,
         area.y as f32,
         width,
         area.height as f32,
         colors.convert_opaque(theme.split_divider()),
+        RADIUS_PILL,
+        FLAG_ROUND_ALL,
     ));
 
     // Thumb, sized by the visible fraction and floored so it stays grabbable when
@@ -929,12 +1040,14 @@ pub fn draw_scrollbar(
     let travel = area.height as f32 - thumb_height;
     let progress = ui.scroll() as f32 / ui.max_scroll().max(1) as f32;
 
-    out.push(Instance::solid(
+    out.push(Instance::rounded(
         x,
         area.y as f32 + travel * progress,
         width,
         thumb_height,
-        colors.convert_opaque(theme.bright.black),
+        colors.convert_opaque(theme.muted_foreground()),
+        RADIUS_PILL,
+        FLAG_ROUND_ALL,
     ));
 }
 
@@ -1125,9 +1238,11 @@ mod tests {
             .iter()
             .position(|i| i.flags & crate::FLAG_TEXTURED != 0)
             .expect("there should be text");
+        // "Not textured" rather than "no flags at all": a background may carry corner
+        // rounding flags and still be a background.
         let last_solid = out
             .iter()
-            .rposition(|i| i.flags == 0)
+            .rposition(|i| i.flags & crate::FLAG_TEXTURED == 0)
             .expect("there should be solids");
         assert!(
             last_solid < first_text,
@@ -1146,12 +1261,14 @@ mod tests {
         draw_widgets(&mut out, &mut fonts, &ui, &theme, colors());
 
         let ring = colors().convert_opaque(theme.cursor());
-        let edges = out
+        // One ring instance, not four edge quads: four rectangles cannot follow a corner
+        // curve, so the ring is cut from the same rounded distance field as the fill.
+        let rings = out
             .iter()
-            .filter(|i| i.flags == 0 && i.color == ring)
-            .filter(|i| i.size[0] == FOCUS_RING || i.size[1] == FOCUS_RING)
+            .filter(|i| i.color == ring && i.flags & crate::instance::FLAG_RING != 0)
+            .filter(|i| i.stroke_width == FOCUS_RING)
             .count();
-        assert_eq!(edges, 4, "a ring is four edges");
+        assert_eq!(rings, 1, "the focused widget should have exactly one ring");
     }
 
     #[test]
@@ -1162,12 +1279,11 @@ mod tests {
         draw_widgets(&mut out, &mut fonts, &sample_ui(), &theme, colors());
 
         let ring = colors().convert_opaque(theme.cursor());
-        let edges = out
+        let rings = out
             .iter()
-            .filter(|i| i.flags == 0 && i.color == ring)
-            .filter(|i| i.size[0] == FOCUS_RING || i.size[1] == FOCUS_RING)
+            .filter(|i| i.color == ring && i.flags & crate::instance::FLAG_RING != 0)
             .count();
-        assert_eq!(edges, 0);
+        assert_eq!(rings, 0);
     }
 
     #[test]
@@ -1183,8 +1299,9 @@ mod tests {
 
         let highlight = colors().convert_opaque(theme.background_focused());
         assert!(
-            out.iter()
-                .any(|i| i.flags == 0 && i.color == highlight && i.size[0] == rect.width as f32),
+            out.iter().any(|i| i.flags & crate::FLAG_TEXTURED == 0
+                && i.color == highlight
+                && i.size[0] == rect.width as f32),
             "the hovered row should be filled"
         );
     }
@@ -1215,7 +1332,8 @@ mod tests {
         // simply did not respond.
         assert!(
             out.iter()
-                .any(|i| i.flags == 0 && i.size[0] == placed.rect.width as f32),
+                .any(|i| i.flags & crate::FLAG_TEXTURED == 0
+                    && i.size[0] == placed.rect.width as f32),
             "the button box must be drawn at the rect that hit-testing uses"
         );
         assert!(
@@ -1240,7 +1358,7 @@ mod tests {
         let mut out = Vec::new();
         draw_widgets(&mut out, &mut fonts, &ui, &theme, colors());
 
-        let dimmed = colors().convert_opaque(theme.bright.black);
+        let dimmed = colors().convert_opaque(theme.muted_foreground());
         assert!(
             out.iter()
                 .any(|i| i.flags & crate::FLAG_TEXTURED != 0 && i.color == dimmed),
@@ -1369,7 +1487,9 @@ mod tests {
         let ring = colors().convert_opaque(theme.cursor());
         assert!(
             out.iter().any(|i| {
-                i.flags == 0 && i.color == ring && (i.position[1] - rect.y as f32).abs() < 1.0
+                i.flags & crate::instance::FLAG_RING != 0
+                    && i.color == ring
+                    && (i.position[1] - rect.y as f32).abs() < 1.0
             }),
             "the ring should be on the focused row"
         );

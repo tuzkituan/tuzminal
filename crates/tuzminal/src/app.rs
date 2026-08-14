@@ -90,8 +90,20 @@ const RESIZE_STEP: f32 = 0.02;
 /// impossible to hit otherwise.
 const DIVIDER_GRAB: u32 = 4;
 
-/// Vertical inset inside the tab and status strips.
+/// Vertical inset inside the status strip.
 const CHROME_PADDING: u32 = 9;
+
+/// Vertical inset inside the tab strip, per edge.
+///
+/// Larger than [`CHROME_PADDING`]: the status bar holds text, while the tab strip holds
+/// tab shapes and buttons that are themselves inset from their slots. At the status bar's
+/// padding those insets came out of the glyphs' own breathing room, so the titles sat
+/// tight against the top and bottom of their tabs.
+///
+/// Not much larger, though. It went to 13 first, which made the strip taller than the
+/// content it holds needs — and because a button's icon is a fraction of its slot, a
+/// taller strip also grew every icon.
+const TAB_BAR_PADDING: u32 = 11;
 
 /// Width of the invisible band along each window edge that resizes instead of
 /// selecting. Only exists without decorations, where the compositor draws no frame
@@ -531,7 +543,7 @@ impl App {
         }
         // Sized from the font so the strip scales with the text rather than being a
         // fixed pixel height that looks wrong at other sizes.
-        self.cell_size().height + CHROME_PADDING * 2
+        self.cell_size().height + TAB_BAR_PADDING * 2
     }
 
     /// Height of the status bar, or zero when no plugin is contributing anything.
@@ -558,6 +570,15 @@ impl App {
     ///
     /// Config stores cells rather than pixels so the sidebar scales with the font
     /// instead of becoming a sliver at 20pt.
+    /// Whether the sidebar is actually on screen, as opposed to merely open.
+    ///
+    /// It is hidden by being given zero width rather than by being closed, so that it keeps
+    /// its directory and scroll position across a trip to the settings page. Anything that
+    /// routes input to it has to ask this and not `sidebar.is_some()`.
+    fn sidebar_visible(&self) -> bool {
+        self.sidebar_width() > 0
+    }
+
     fn sidebar_width(&self) -> u32 {
         if self.sidebar.is_none() {
             return 0;
@@ -661,6 +682,15 @@ impl App {
             // All three live behind one button now, so it lights for any of them.
             TabKind::Settings | TabKind::Help | TabKind::Plugins => out.push(ChromeButton::AppMenu),
             TabKind::Terminal => {}
+        }
+        // An open dropdown lights the button it hangs from. Without this the menu appears
+        // to belong to nothing: the button you just pressed goes back to looking idle the
+        // moment the pointer leaves it, while its menu is still on screen.
+        if let Some(menu) = &self.menu {
+            out.push(match menu.kind {
+                crate::menu::MenuKind::AppMenu => ChromeButton::AppMenu,
+                crate::menu::MenuKind::NewTabShell => ChromeButton::NewTabMenu,
+            });
         }
         out
     }
@@ -1089,7 +1119,14 @@ impl App {
                 }
             })
             .collect();
-        let hovered_button = self.hovered_button;
+        // Suppressed while a dropdown is open. The menu hangs directly off the button the
+        // tooltip describes, so the two land on top of each other — and once the menu is
+        // showing it says what the button does far better than a one-word label does.
+        let hovered_button = if self.menu.is_some() {
+            None
+        } else {
+            self.hovered_button
+        };
         // Resolved before the field destructure below, which takes `self` apart and
         // leaves the keymap out of reach.
         let shortcut = hovered_button.and_then(|b| self.button_shortcut(b));
@@ -1307,7 +1344,6 @@ impl App {
                 &active_buttons,
                 theme,
                 colors,
-                radius,
             );
 
             // After the strip, so it overlaps the tabs below rather than being
@@ -2202,6 +2238,14 @@ impl App {
     fn on_tab_activated(&mut self) {
         for pane in self.layout.visible_panes() {
             self.activity.remove(&pane);
+        }
+        // Keyboard focus cannot survive onto a tab where the sidebar is not drawn. The
+        // `sidebar_visible()` guard in `on_key` already refuses to route keys there, so this
+        // is belt and braces — but leaving the flag set also leaves the focus ring drawn on
+        // the sidebar the moment a terminal tab comes back, which is not where the user left
+        // it.
+        if !self.sidebar_visible() {
+            self.sidebar_focused = false;
         }
         let index = self.layout.active_index() as u32;
         self.notify_plugins(PluginEvent::TabSwitch { index });
@@ -3190,6 +3234,21 @@ impl App {
     }
 
     fn split(&mut self, dir: Direction) {
+        // A page tab cannot be split, and refusing here is what makes that true.
+        //
+        // `Layout::split` is content-agnostic and will happily split the placeholder pane
+        // a page tab carries, which used to half-work in the worst way: the page kept
+        // drawing into `panes.first()` while a real shell was spawned in the other half —
+        // and because keyboard routing keys off the *tab's* kind, that shell could not be
+        // typed into at all. A shell you cannot reach is worse than no split.
+        if self.layout.active_kind() != TabKind::Terminal {
+            self.notify(
+                "This tab cannot be split".to_owned(),
+                tuz_plugin_api::NotifyLevel::Info,
+            );
+            return;
+        }
+
         // Before `split`, which gives focus to the new half.
         let inherited = self.focused_directory();
         if let Some(pane) = self.layout.split(dir) {
@@ -3437,7 +3496,12 @@ impl App {
         // shell beside it. Checked before the keymap so its own keys win, but after
         // nothing: the toggle binding is handled inside `explorer_key` so the chord
         // that opened it still closes it.
-        if self.sidebar_focused && self.sidebar.is_some() {
+        // `sidebar_visible()`, not `sidebar.is_some()`. The sidebar is hidden by being
+        // given zero width on a page tab, so `is_some()` stayed true while nothing was on
+        // screen — and this branch swallows every key. Switching to Settings with a focused
+        // sidebar therefore sent every keystroke to an undrawn explorer, where the rename
+        // and delete prompts opened invisibly. Escape was the only way out.
+        if self.sidebar_focused && self.sidebar_visible() {
             if self.keymap.lookup(&chord) == Some(&Action::OpenExplorer) {
                 self.toggle_explorer();
                 return;
@@ -4098,7 +4162,13 @@ impl App {
             return;
         }
 
-        if self.panel.is_some() {
+        // `settings_active()`, not `panel.is_some()`. The panel outlives the tab being
+        // looked at — it keeps its scroll position and unsaved edits while you work
+        // elsewhere, which is the point of it being a tab — so `is_some()` meant that
+        // merely *having* Settings open sent the wheel to it from every other tab. This
+        // guard is a leftover from when the panel was an overlay and `is_some()` genuinely
+        // meant "on screen".
+        if self.settings_active() {
             let cell_height = self.cell_size().height.max(1) as f64;
             let lines = match delta {
                 MouseScrollDelta::LineDelta(_, y) => -(y as f64 * 3.0 * cell_height),

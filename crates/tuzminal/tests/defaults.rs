@@ -135,6 +135,30 @@ fn the_status_bar_is_hidden_on_the_settings_tab() {
     assert_eq!(layout.active_kind(), TabKind::Terminal);
 }
 
+/// A page tab carries a placeholder pane so the layout code needs no special case, and
+/// `Layout::split` is content-agnostic — it will split that placeholder just as happily as
+/// a real one.
+///
+/// So the refusal has to live in the app, and this records why it must: the split used to
+/// half-succeed. The page kept drawing into the first pane while a real shell was spawned
+/// in the second, and because keyboard routing keys off the *tab's* kind, that shell could
+/// never be typed into. This asserts the layout behaviour the guard exists to intercept,
+/// so that if `Layout::split` ever starts refusing on its own, the reason the app checks is
+/// still written down.
+#[test]
+fn the_layout_will_split_a_page_tab_so_the_app_has_to_refuse() {
+    use tuz_layout::{Layout, TabKind};
+
+    let (mut layout, _) = Layout::new();
+    layout.new_tab_of(TabKind::Settings);
+    assert_eq!(layout.active_kind(), TabKind::Settings);
+
+    assert!(
+        layout.split(tuz_layout::Direction::Right).is_some(),
+        "the layout splits any leaf, page tab included — the app is what must say no"
+    );
+}
+
 #[test]
 fn a_default_config_shows_the_tab_strip_so_the_buttons_are_reachable() {
     let config = Config::default();

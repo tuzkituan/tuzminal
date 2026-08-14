@@ -20,10 +20,12 @@ pub mod widget;
 
 pub use chrome::PADDING as SEGMENT_PADDING;
 pub use chrome::{
-    draw_chrome_buttons, draw_status_bar, draw_tab_bar, draw_tooltip, StatusItem, TabLabel,
+    draw_chrome_buttons, draw_status_bar, draw_tab_bar, draw_tooltip, tab_pill, StatusItem,
+    TabLabel,
 };
 pub use instance::{
     build_pane, ColorSpace, Instance, PaneGeometry, FLAG_COLOR_GLYPH, FLAG_TEXTURED,
+    RADIUS_CONTROL, RADIUS_PILL, RADIUS_SURFACE,
 };
 pub use text::{draw_in_box, measure, Align};
 pub use widget::{

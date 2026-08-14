@@ -2,17 +2,20 @@
 
 A plugin is a folder with a `plugin.toml` and one entry file. It can add status bar
 segments, bind keys, register commands, drive panes and tabs, and type into your
-shell. It cannot draw — see [What plugins cannot do](#what-plugins-cannot-do), which
-is a deliberate boundary rather than a gap.
+shell. It cannot draw, with one narrow exception — a line of ghost text at the cursor
+— see [What plugins cannot do](#what-plugins-cannot-do), which is a set of deliberate
+boundaries rather than a list of gaps.
 
-Two working plugins ship in [`plugins/`](../plugins): `clock`, a tour of the API in
-forty lines, and `open-in-ide`, which was a built-in feature until it became a plugin.
-Both are loaded by the test suite, so they are known to work against the current API
-rather than being snippets that rotted.
+Three working plugins ship in [`plugins/`](../plugins): `clock`, a tour of the API in
+forty lines; `open-in-ide`, which was a built-in feature until it became a plugin; and
+`suggest`, which offers history completions as you type. All three are loaded by the
+test suite, so they are known to work against the current API rather than being
+snippets that rotted.
 
-`open-in-ide` is the more interesting one to read. Porting it is what added clickable
-status segments — if the API cannot express something that ordinary, it is not an API
-worth having.
+`open-in-ide` and `suggest` are the interesting ones to read, because each was written
+by pushing on the API until it could express them. Porting `open-in-ide` is what added
+clickable status segments; `suggest` is what added `input_line` and `set_inline_hint`.
+If the API cannot express something ordinary, it is not an API worth having.
 
 ---
 
@@ -86,6 +89,7 @@ Every handler is optional. Anything you do not define is never called.
 | `on_title_change(ctx, e)` | a program set the window title | `pane`, `title` |
 | `on_bell(ctx, e)` | a program rang the bell | `pane` |
 | `on_pane_output(ctx, e)` | a pane produced output | `pane`, `text` |
+| `on_input_line(ctx, e)` | the focused pane's input line changed | `pane`, `line`, `cursor_col`, `at_line_end` |
 | `on_osc(ctx, e)` | an OSC sequence the terminal ignored | `pane`, `code`, `payload` |
 
 Register keybinds and commands in `on_startup`. The keymap is built immediately
@@ -99,21 +103,42 @@ budget than other handlers — 5 ms by default, against 250 ms. Return `true` to
 swallow the key; return nothing to let it through, which is what you want almost
 always.
 
-### Opting in to expensive events
+### Opting in to sensitive events
 
-`pane_output` is not delivered unless you ask for it twice — once in `events`, once in
-`permissions`:
+Two events are not delivered unless you ask for them twice — once in `events`, once in
+`permissions`. Both show a plugin what the user is doing, so both the intent and the
+grant have to be explicit.
 
 ```toml
 events = ["pane_output"]
 permissions = ["read-output"]
 ```
 
-It is everything your shell prints, including anything you type that a program echoes.
-The install prompt says so, because a plugin reading it is reading your session.
+`pane_output` is everything your shell prints, including anything you type that a
+program echoes. The install prompt says so, because a plugin reading it is reading your
+session.
 
-Leaving `events` empty means "the cheap ones", which is every event above except
-`pane_output`.
+```toml
+events = ["input_line"]
+permissions = ["read-input"]
+```
+
+`input_line` is narrower: one row, left of the cursor, focused pane only, and only when
+it changed. It is **not** delivered while a full-screen program holds the alternate
+screen, so what you type into `vim` or a TUI is never reported, and it is refused for
+any row carrying hidden (SGR 8) cells, which is what a password field uses. What it does
+carry is the command line you are typing — including a secret passed as an argument,
+because the shell echoes those.
+
+`line` starts at column 0, so it **includes your prompt**. No escape sequence marks
+where a prompt ends, and the terminal does not guess: working that out is the plugin's
+job. `plugins/suggest/init.lua` explains one way to do it.
+
+Leaving `events` empty means "the cheap ones", which is every event above except those
+two.
+
+**A non-empty `events` list is exclusive.** Listing `input_line` and nothing else stops
+`key` and `tab_switch` arriving, silently — every event you want must be named.
 
 ---
 
@@ -146,6 +171,9 @@ ctx.set_status({
   { text = "…", foreground = "#rrggbb", background = "#rrggbb" },
   { text = "VS", id = "code" },   -- an `id` makes it clickable
 })
+
+ctx.set_inline_hint(text)                 -- ghost text at the cursor; "" clears it
+ctx.set_inline_hint_to(pane, text)        -- or on a specific pane
 ctx.set_config("[font]\nsize = 14.0\n")   -- a TOML fragment, overlaid
 ctx.reload_config()
 ctx.quit()
@@ -162,6 +190,7 @@ Declared in `plugin.toml`, shown to the user at install, denied unless listed.
 | Permission | Effect |
 |---|---|
 | `read-output` | required for `pane_output` |
+| `read-input` | required for `input_line` — the command line you type, secrets in arguments included |
 | `fs-read = "/path"` / `fs-write = "/path"` | Lua keeps `io` and `os.remove`/`os.rename` |
 | `spawn-process` | Lua keeps `os.execute` |
 | `clipboard`, `network` | **declared but not yet implemented** |
@@ -225,8 +254,14 @@ reading an older plugin that works around a missing `ctx` function, that gap is 
 
 Recorded here because these are decisions, not omissions:
 
-- **Draw anything.** No canvas, no widgets, no panels. The only pixels a plugin
-  influences are status segment text and its two colours.
+- **Draw anything, beyond status segment text and one line of ghost text.** No canvas,
+  no widgets, no panels. `set_inline_hint` is the single exception, and it is
+  deliberately the narrowest one that makes history autosuggestion possible: the plugin
+  supplies a string and nothing else. The host chooses the position (the cursor) and the
+  colour (the theme's), refuses the hint whenever it would cover something the program
+  printed, refuses it on the alternate screen and on an unfocused pane, truncates it at
+  the last column, and drops it the moment the line changes. A plugin cannot say *where*,
+  cannot say *what colour*, and cannot rely on it being drawn at all.
 - **Add a toolbar button, a tab, a page, or a menu entry.** Those are closed enums in
   the binary.
 - **Receive a click anywhere but a status segment.** Segments given an `id` are

@@ -221,8 +221,9 @@ which produces a plausible-looking instance buffer and a blank window.
   is documented as having no effect yet.
 - **IME.** Wayland `text-input-v3` for CJK input is genuinely involved and is not a
   small addition.
-- **`select_all`**, and plugin config overlays (`SetConfigOverlay` is accepted and
-  logged, not applied).
+- **`select_all`**. Plugin config overlays used to be listed here as accepted-and-logged;
+  `SetConfigOverlay` is applied now, and a fragment that fails to parse is reported to the
+  user rather than partially applied.
 - **macOS and Windows.** The platform layer is abstracted and `alacritty_terminal`
   supplies ConPTY, but neither target has ever been built or run. Treat as
   unverified rather than done.

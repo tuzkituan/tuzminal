@@ -196,6 +196,20 @@ impl ChromeButton {
         })
     }
 
+    /// Whether this button acts on the window rather than on the terminal.
+    ///
+    /// The window controls are a different kind of thing from the rest of the strip:
+    /// pressing one is about the window, and pressing any other is about what is inside
+    /// it. They are also the ones with real consequences, which is why the toolbar draws
+    /// a rule before them — a close button flush against a settings button is a
+    /// misclick waiting to happen.
+    pub fn is_window_control(self) -> bool {
+        matches!(
+            self,
+            ChromeButton::Minimize | ChromeButton::Maximize | ChromeButton::Close
+        )
+    }
+
     /// Whether this button belongs immediately after the last tab rather than in
     /// the group packed against the right edge.
     ///
@@ -844,8 +858,15 @@ pub fn action_rects_collapsing(
         return (Vec::new(), Vec::new(), bar);
     }
 
-    // How many whole buttons fit beside the space kept for tabs.
-    let room = bar.width.saturating_sub(reserve) / size;
+    // Space between the window controls and the app buttons, so close does not sit flush
+    // against the button next to it. Derived from the button size rather than fixed, so
+    // it stays proportionate when the font size changes the whole strip's height.
+    let group_gap = (size / 2).max(4);
+
+    // How many whole buttons fit beside the space kept for tabs. The gap is subtracted
+    // here as well as spent below: counting the room without it would fit one more button
+    // than there is space for, and the loop would then drop it off the left edge.
+    let room = bar.width.saturating_sub(reserve + group_gap) / size;
 
     // Who leaves, in the order they volunteered. Sorted by `collapse_order` rather than
     // by position, so it is the least-missed button that goes and not merely the last
@@ -865,11 +886,21 @@ pub fn action_rects_collapsing(
 
     let mut placed = Vec::with_capacity(buttons.len());
     let mut right = bar.right();
+    // Tracks the group boundary as the loop walks right to left. The window controls are
+    // packed first, so the boundary is where a control is followed by something that is
+    // not one.
+    let mut previous_was_control = false;
 
     for button in buttons {
         if collapsed.contains(button) {
             continue;
         }
+        let is_control = button.is_window_control();
+        if previous_was_control && !is_control {
+            right -= group_gap as i32;
+        }
+        previous_was_control = is_control;
+
         let left = right - size as i32;
         // Nothing collapsible left to give up, and still no room. Better a button off the
         // edge than a close button that cannot be clicked, so the loop stops here.
@@ -889,7 +920,11 @@ pub fn action_rects_collapsing(
 fn close_rect(tab: Rect) -> Rect {
     // A square inset from the edge, and never more than a third of the tab: on a
     // narrow tab a full-height button would leave no room for the title.
-    let size = (tab.height * 2 / 3).max(1).min(tab.width / 3);
+    //
+    // Half the strip height, not two thirds. The renderer rounds its hover fill, and at
+    // two thirds that fill was a disc nearly as tall as the tab's own pill — it read as
+    // the largest thing on the tab rather than as an affordance on it.
+    let size = (tab.height / 2).max(1).min(tab.width / 3);
     let inset = ((tab.height.saturating_sub(size)) / 2) as i32;
     Rect::new(tab.right() - size as i32 - inset, tab.y + inset, size, size)
 }
@@ -1909,6 +1944,51 @@ mod collapse_tests {
         let (placed, collapsed) = at(1600);
         assert_eq!(placed.len(), trailing().len());
         assert!(collapsed.is_empty(), "{collapsed:?} collapsed at 1600px");
+    }
+
+    #[test]
+    fn the_window_controls_are_separated_from_the_app_buttons_by_a_gap() {
+        // Close sits next to a button that opens a panel. Without a gap between the two
+        // groups they read as one strip of equivalent things, and a misclick closes the
+        // window. The renderer draws its rule inside this gap.
+        let (placed, _, _) = action_rects_collapsing(Rect::new(0, 0, 1600, H), &trailing(), 120);
+
+        let leftmost_control = placed
+            .iter()
+            .filter(|(b, _)| b.is_window_control())
+            .map(|(_, r)| r.x)
+            .min()
+            .expect("the window controls should be placed");
+        let rightmost_app = placed
+            .iter()
+            .filter(|(b, r)| !b.is_window_control() && r.right() <= leftmost_control)
+            .map(|(_, r)| r.right())
+            .max()
+            .expect("the app buttons should be placed");
+
+        // Absolute bounds, not "bigger than zero": the gap is half a button wide, so it
+        // has to be at least several pixels and cannot have swallowed a whole slot.
+        let gap = leftmost_control - rightmost_app;
+        assert!(gap >= 4, "the groups are only {gap}px apart");
+        assert!(gap < H as i32, "the gap grew wider than a button: {gap}px");
+    }
+
+    #[test]
+    fn the_gap_does_not_push_a_button_off_the_left_edge() {
+        // The gap is spent from the same width the buttons are, so the room calculation
+        // has to account for it. If it does not, the last button is placed at a negative
+        // x and simply cannot be clicked.
+        for width in 120..1200 {
+            let (placed, _, _) =
+                action_rects_collapsing(Rect::new(0, 0, width, H), &trailing(), 120);
+            for (button, rect) in &placed {
+                assert!(
+                    rect.x >= 0,
+                    "{button:?} at x={} on a {width}px strip",
+                    rect.x
+                );
+            }
+        }
     }
 
     #[test]
