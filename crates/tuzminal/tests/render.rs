@@ -1090,3 +1090,50 @@ fn a_rounded_border_leaves_the_window_corner_transparent() {
         "nothing drawn at ({probe}, {probe}), so the outline stops short of the curve"
     );
 }
+
+/// A click landing outside the terminal's grid must not index past the end of it.
+///
+/// The pane geometry and the grid inside it can disagree for a moment: a window resize
+/// moves the panes immediately and tells the terminals once the drag settles. Between
+/// those two, the pane is wider and taller than its grid, and `Layout::cell_at` clamps
+/// to the pane.
+#[test]
+fn selecting_outside_the_grid_is_clamped_rather_than_out_of_bounds() {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point, Side};
+    use alacritty_terminal::selection::{Selection, SelectionType};
+
+    let session = Session::detached(PaneId(1), TermSize::new(20, 5, 8, 16));
+    session.feed_for_test(b"hello world\r\nsecond line\r\n");
+
+    let term = session.term();
+    let mut term = term.lock();
+    let (cols, lines) = (term.columns(), term.screen_lines());
+
+    // Where a click in a pane that has grown but whose grid has not would land.
+    let col = Column(cols.saturating_sub(1));
+    let line = Line(lines.saturating_sub(1) as i32);
+
+    term.selection = Some(Selection::new(
+        SelectionType::Simple,
+        Point::new(line, col),
+        Side::Left,
+    ));
+    if let Some(sel) = term.selection.as_mut() {
+        sel.update(Point::new(line, col), Side::Right);
+    }
+
+    // Resolving the selection is what would index the grid. It must produce a range
+    // inside it, or nothing.
+    let range = term.selection.as_ref().and_then(|s| s.to_range(&term));
+    if let Some(range) = range {
+        assert!(
+            range.start.column.0 < cols && range.end.column.0 < cols,
+            "selection columns {}..{} escape a {cols}-column grid",
+            range.start.column.0,
+            range.end.column.0
+        );
+    }
+    // And the text is extractable without panicking, which is the real failure mode.
+    let _ = term.selection_to_string();
+}

@@ -98,6 +98,15 @@ const CHROME_PADDING: u32 = 9;
 /// of its own and a borderless window would otherwise be stuck at one size.
 const RESIZE_BORDER: i32 = 6;
 
+/// How long the window size must hold still before the terminals are told about it.
+///
+/// Long enough that a continuous drag never reaches it — resize events arrive every few
+/// milliseconds while an edge is moving — and short enough that letting go feels like it
+/// took effect immediately. The cost of getting it wrong in either direction is small:
+/// too short and some of the shimmer comes back, too long and the content lags a beat
+/// behind the window after the mouse is released.
+const GRID_SETTLE: Duration = Duration::from_millis(80);
+
 /// Wayland app id and X11 `WM_CLASS`.
 ///
 /// Must match the basename of the installed `.desktop` file, or the desktop
@@ -160,6 +169,26 @@ pub struct App {
     renderer: Option<Renderer>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
+
+    /// Whether this frame is carrying a resize, for the timing log below.
+    resizing: bool,
+
+    /// Resize events received since the last one was acted on.
+    ///
+    /// Diagnostics only. A drag delivers far more of these than there are frames to
+    /// draw, and the ratio is the thing to look at when resizing feels slow: many events
+    /// per frame means the compositor is ahead of us, one per frame means it is not, and
+    /// the two have completely different causes.
+    resize_events: u32,
+
+    /// When the deferred grid resize is due, if one is pending.
+    ///
+    /// A window drag moves the panes every frame, and telling the terminals about it
+    /// every frame is both the most expensive thing in the frame and the reason the
+    /// content shimmers. So the geometry follows the pointer and the grids follow the
+    /// geometry once it stops. Pushed forward by each new resize, so a continuous drag
+    /// never reaches it.
+    grid_due: Option<Instant>,
 
     /// The newest size the compositor has asked for, not yet acted on.
     ///
@@ -378,6 +407,9 @@ impl App {
             pending_shell: None,
             pending_cwd: None,
             pending_size: None,
+            grid_due: None,
+            resize_events: 0,
+            resizing: false,
             menu: None,
             menu_rect: None,
             help: None,
@@ -609,6 +641,15 @@ impl App {
 
     /// Recompute pane geometry and push the new grid sizes to every PTY.
     fn relayout(&mut self) {
+        self.recompute_frame();
+        self.sync_grids();
+    }
+
+    /// Recompute pane rectangles for the current window size.
+    ///
+    /// The cheap half of a relayout: arithmetic over the split tree, no terminal state
+    /// touched. This is all a frame needs in order to be drawn at the right size.
+    fn recompute_frame(&mut self) {
         // Nothing to lay out once the last tab is gone, and `Layout` indexes its
         // active tab unconditionally, so asking would panic.
         if self.layout.is_empty() {
@@ -617,8 +658,20 @@ impl App {
         }
         let (w, h) = self.gpu.as_ref().map_or((1, 1), |g| g.size());
         let opts = self.layout_options();
-        let frame = self.layout.compute(Rect::from_size(w, h), &opts);
+        self.frame = Some(self.layout.compute(Rect::from_size(w, h), &opts));
+    }
 
+    /// Tell each pane's terminal and shell about its grid size.
+    ///
+    /// The expensive half, and the reason it is separable. Two things happen per pane:
+    /// `Term::resize` rewraps the scrollback whenever the column count changes, and the
+    /// shell gets a `SIGWINCH` and redraws. Running that on every frame of a window drag
+    /// is what made the content visibly rewrap and full-screen programs repaint
+    /// continuously — the shimmering while dragging an edge. See `settle_grids`.
+    fn sync_grids(&mut self) {
+        let Some(frame) = self.frame.clone() else {
+            return;
+        };
         let cell = self.cell_size();
         for pane in &frame.panes {
             if let Some(session) = self.sessions.get_mut(&pane.pane) {
@@ -630,7 +683,17 @@ impl App {
                 ));
             }
         }
-        self.frame = Some(frame);
+        self.grid_due = None;
+    }
+
+    /// Apply a deferred grid resize once the drag has stopped moving.
+    ///
+    /// Called from `about_to_wait`, which also arranges to be woken at the deadline.
+    fn settle_grids(&mut self) {
+        if self.grid_due.is_some_and(|due| Instant::now() >= due) {
+            self.sync_grids();
+            self.request_redraw();
+        }
     }
 
     /// Start a shell for a pane that does not have one yet.
@@ -742,12 +805,28 @@ impl App {
         if gpu.size() == (size.width, size.height) {
             return;
         }
+        log::debug!(
+            "resize to {}x{} after {} event(s)",
+            size.width,
+            size.height,
+            self.resize_events
+        );
+        self.resize_events = 0;
+        self.resizing = true;
+
         gpu.resize(size.width, size.height);
-        self.relayout();
+
+        // Geometry only. The grids are told once the drag settles — see `sync_grids`
+        // for what that costs and `grid_due` for why it is worth deferring.
+        self.recompute_frame();
+        self.grid_due = Some(Instant::now() + GRID_SETTLE);
     }
 
     fn redraw(&mut self) {
         self.apply_pending_resize();
+        // Only timed on frames that carried a resize, so an idle terminal logs nothing
+        // and the cost of asking the clock is not paid per keystroke.
+        let started = self.resizing.then(Instant::now);
 
         // The window is closing; the layout has no active tab left to query.
         if self.layout.is_empty() {
@@ -1506,6 +1585,15 @@ impl App {
                 }
             }
         });
+
+        if let Some(started) = started {
+            // Includes `get_current_texture`, which blocks until the display has finished
+            // with the previous frame — so this is the number that says whether resizing
+            // is limited by our own work or by waiting for the compositor. Anything close
+            // to a refresh interval is the latter.
+            log::debug!("resize frame took {:.2?}", started.elapsed());
+        }
+        self.resizing = false;
 
         // The field borrows end here, so `self` is usable again.
         self.panel_body = panel_body;
@@ -4001,15 +4089,25 @@ fn to_direction(direction: tuz_plugin_api::Direction) -> Direction {
 }
 
 /// Map a viewport cell to a grid point, accounting for scrollback offset.
+///
+/// Clamped to the terminal's own grid rather than trusting the caller. `Layout::cell_at`
+/// clamps to the *pane's* column count, and the two can disagree: a window resize moves
+/// the panes immediately and tells the terminals once the drag settles, so for a moment
+/// the pane is wider than the grid inside it. A `Column` past the end of the grid is not
+/// a wrong selection, it is an out-of-bounds index into it.
 fn viewport_point(
     term: &alacritty_term::Term<tuz_core::EventProxy>,
     col: u16,
     row: u16,
 ) -> alacritty_index::Point {
+    use alacritty_terminal::grid::Dimensions;
+
     let offset = term.grid().display_offset();
+    let col = (col as usize).min(term.columns().saturating_sub(1));
+    let row = (row as usize).min(term.screen_lines().saturating_sub(1));
     alacritty_index::Point::new(
         alacritty_index::Line(row as i32 - offset as i32),
-        alacritty_index::Column(col as usize),
+        alacritty_index::Column(col),
     )
 }
 
@@ -4190,6 +4288,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // `RedrawRequested` do the work once, which is also the point at which
                 // the compositor is ready for another frame.
                 self.pending_size = Some(size);
+                self.resize_events += 1;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -4242,10 +4341,13 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        // A drag that has stopped moving: the terminals can be told their new size now.
+        self.settle_grids();
+
         // Whichever wants a frame sooner decides when to wake.
         let blink = self.update_blink();
         let toast = self.update_toasts();
-        match [blink, toast].into_iter().flatten().min() {
+        match [blink, toast, self.grid_due].into_iter().flatten().min() {
             Some(next) => event_loop.set_control_flow(ControlFlow::WaitUntil(next)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
