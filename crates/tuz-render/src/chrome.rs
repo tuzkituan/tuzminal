@@ -50,6 +50,7 @@ pub fn draw_tab_bar(
     labels: &[TabLabel<'_>],
     theme: &Theme,
     colors: ColorSpace,
+    radius: f32,
 ) {
     if bar.height == 0 || tabs.is_empty() {
         return;
@@ -57,12 +58,18 @@ pub fn draw_tab_bar(
 
     // The strip itself, so the area past the last tab is filled rather than showing
     // the window clear color.
-    out.push(Instance::solid(
+    //
+    // Only its top corners are rounded: it is the topmost thing in the window, so it
+    // owns the window's top curve, while its bottom edge must stay square to meet the
+    // panes below without a seam.
+    out.push(Instance::rounded(
         bar.x as f32,
         bar.y as f32,
         bar.width as f32,
         bar.height as f32,
         colors.convert(theme.split_divider()),
+        radius,
+        crate::instance::FLAG_ROUND_TOP,
     ));
 
     for (rect, label) in tabs.iter().zip(labels) {
@@ -185,6 +192,43 @@ pub fn draw_tab_bar(
             }
         }
     }
+}
+
+/// Draw the window title in the empty stretch of the title bar.
+///
+/// `area` is what is left between the last tab (with its new-tab button) and the
+/// buttons packed against the right edge — the same region that drags the window.
+/// Nothing is drawn when that gap is too narrow to hold a few characters, because a
+/// title elided to "T…" is worse than no title at all.
+pub fn draw_window_title(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    area: Rect,
+    title: &str,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    if title.is_empty() || area.height == 0 {
+        return;
+    }
+    let cell_width = fonts.metrics().width as f32;
+    if (area.width as f32) < cell_width * 6.0 {
+        return;
+    }
+
+    // Dimmed, like an inactive tab: the title is orientation, not something to read
+    // on every glance, and full-strength text here competes with the active tab.
+    text::draw_in_box(
+        out,
+        fonts,
+        title,
+        area,
+        PADDING,
+        Align::Center,
+        theme.bright.black,
+        colors,
+        Style::Regular,
+    );
 }
 
 /// Draw the action buttons packed at the right of the tab strip.
@@ -432,6 +476,7 @@ mod tests {
             &labels(0, 1),
             &Theme::builtin_default(),
             colors(),
+            0.0,
         );
         assert!(out.is_empty());
     }
@@ -449,6 +494,7 @@ mod tests {
             &[],
             &Theme::builtin_default(),
             colors(),
+            0.0,
         );
         assert!(
             out.is_empty(),
@@ -471,10 +517,15 @@ mod tests {
             &labels(0, 2),
             &Theme::builtin_default(),
             colors(),
+            0.0,
         );
 
         let first = out.first().expect("something should be drawn");
-        assert_eq!(first.flags, 0, "the strip background is a solid");
+        assert_eq!(
+            first.flags & crate::FLAG_TEXTURED,
+            0,
+            "the strip background is a solid, not a glyph"
+        );
         assert_eq!(first.size, [600.0, 24.0]);
     }
 
@@ -494,6 +545,7 @@ mod tests {
             &labels(0, 2),
             &theme,
             colors(),
+            0.0,
         );
 
         // The active tab's background is the focused pane background, so the strip
@@ -529,6 +581,7 @@ mod tests {
             &labels(2, 4),
             &theme,
             colors(),
+            0.0,
         );
 
         let marker = colors().convert_opaque(theme.cursor());
@@ -554,6 +607,7 @@ mod tests {
             &labels(0, 2),
             &Theme::builtin_default(),
             colors(),
+            0.0,
         );
 
         let glyphs = out
@@ -581,6 +635,7 @@ mod tests {
                 &labels(0, 1),
                 &theme,
                 colors(),
+                0.0,
             );
             out.iter()
                 .filter(|i| i.flags & crate::FLAG_TEXTURED != 0)
@@ -606,6 +661,7 @@ mod tests {
                 &marked,
                 &theme,
                 colors(),
+                0.0,
             );
             out.iter()
                 .filter(|i| i.flags & crate::FLAG_TEXTURED != 0)
@@ -643,6 +699,7 @@ mod tests {
             &long,
             &Theme::builtin_default(),
             colors(),
+            0.0,
         );
 
         let right = out

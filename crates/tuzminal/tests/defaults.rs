@@ -106,3 +106,66 @@ fn the_example_config_documents_only_real_actions() {
         );
     }
 }
+
+/// The strip must be visible on first launch, because the buttons live in it.
+///
+/// This shipped broken: the strip hid itself with a single tab to save a row, and
+/// since the new-tab, split and settings buttons are all drawn in that strip, a fresh
+/// launch had **no visible controls at all** — which is precisely the problem the
+/// buttons were added to solve. Keyboard shortcuts still worked, so nothing was
+/// broken enough to fail a test; it was just invisible.
+#[test]
+fn a_default_config_shows_the_tab_strip_so_the_buttons_are_reachable() {
+    let config = Config::default();
+    assert!(
+        config.window.always_show_tab_bar,
+        "the strip must default to visible, or a fresh install has no clickable controls"
+    );
+}
+
+#[test]
+fn the_strip_reserves_height_and_places_buttons_for_a_single_tab() {
+    use tuz_layout::{CellSize, ChromeButton, Layout, LayoutOptions, Rect};
+
+    // What the app builds for a default config with one tab open.
+    let buttons = vec![
+        ChromeButton::Settings,
+        ChromeButton::SplitDown,
+        ChromeButton::SplitRight,
+        ChromeButton::NewTab,
+    ];
+    let opts = LayoutOptions {
+        tab_bar_height: 26,
+        tab_width: 200,
+        min_tab_width: 70,
+        buttons: buttons.clone(),
+        cell: CellSize {
+            width: 10,
+            height: 20,
+        },
+        ..LayoutOptions::default()
+    };
+
+    let (layout, _) = Layout::new();
+    let frame = layout.compute(Rect::from_size(1000, 600), &opts);
+
+    assert!(frame.tab_bar.height > 0, "the strip must be drawn");
+    assert_eq!(
+        frame.actions.len(),
+        buttons.len(),
+        "every button needs a rect, or it cannot be clicked"
+    );
+
+    // And each one is inside the strip, so hit-testing can find it.
+    for (button, rect) in &frame.actions {
+        assert!(
+            frame.tab_at(rect.center_x(), rect.center_y()).is_none(),
+            "{button:?} overlaps a tab, which would steal its clicks"
+        );
+        assert_eq!(
+            frame.action_at(rect.center_x(), rect.center_y()),
+            Some(*button),
+            "{button:?} is not hit-testable at its own rect"
+        );
+    }
+}

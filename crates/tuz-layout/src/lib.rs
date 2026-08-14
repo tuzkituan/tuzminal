@@ -134,6 +134,17 @@ pub enum ChromeButton {
 }
 
 impl ChromeButton {
+    /// Whether this button belongs immediately after the last tab rather than in
+    /// the group packed against the right edge.
+    ///
+    /// Only new-tab does. It acts on the tab strip, so it reads as part of it — the
+    /// same place every browser puts it. Settings and the window controls have
+    /// nothing to do with any particular tab, so they live at the far edge where
+    /// they will not shift around as tabs open and close.
+    pub fn leading(self) -> bool {
+        matches!(self, ChromeButton::NewTab)
+    }
+
     /// The glyph drawn on the button.
     ///
     /// Single characters from ranges an ordinary font covers, so they render without
@@ -579,11 +590,30 @@ impl Layout {
         // Action buttons are square, sized from the strip height, and packed from the
         // right. Tabs then divide whatever is left, so a tab can never sit underneath
         // a button.
-        let (actions, tab_area) = if tab_bar.height > 0 {
-            action_rects(tab_bar, &opts.buttons)
+        let leading: Vec<ChromeButton> =
+            opts.buttons.iter().copied().filter(|b| b.leading()).collect();
+        let trailing: Vec<ChromeButton> = opts
+            .buttons
+            .iter()
+            .copied()
+            .filter(|b| !b.leading())
+            .collect();
+
+        let (mut actions, free) = if tab_bar.height > 0 {
+            action_rects(tab_bar, &trailing)
         } else {
             (Vec::new(), tab_bar)
         };
+
+        // Reserve a slot per leading button up front, so the tabs stop short of where
+        // new-tab will land instead of being covered by it.
+        let reserved = leading.len() as u32 * tab_bar.height;
+        let tab_area = Rect::new(
+            free.x,
+            free.y,
+            free.width.saturating_sub(reserved),
+            free.height,
+        );
 
         let tabs = if tab_bar.height > 0 {
             tab_rects(
@@ -595,6 +625,21 @@ impl Layout {
         } else {
             Vec::new()
         };
+
+        // Leading buttons follow the last tab, so new-tab sits against the strip it
+        // adds to and slides right as tabs are opened.
+        if tab_bar.height > 0 {
+            let size = tab_bar.height;
+            let mut x = tabs.last().map(|t| t.right()).unwrap_or(tab_area.x);
+            for button in leading {
+                let rect = Rect::new(x, tab_bar.y, size, size);
+                if rect.right() > free.right() {
+                    break;
+                }
+                actions.push((button, rect));
+                x += size as i32;
+            }
+        }
 
         let tab_close = tabs.iter().map(|tab| close_rect(*tab)).collect();
 
@@ -1131,6 +1176,66 @@ mod chrome_tests {
         // Misconfiguration must not produce tabs wider than requested.
         let rects = tab_rects(bar(800), 2, 100, 500);
         assert_eq!(rects[0].width, 100);
+    }
+
+    #[test]
+    fn new_tab_follows_the_last_tab_and_the_rest_pack_right() {
+        let (mut layout, _) = Layout::new();
+        layout.new_tab();
+
+        let mut opts = opts_with_chrome();
+        opts.buttons = vec![
+            ChromeButton::Close,
+            ChromeButton::Settings,
+            ChromeButton::NewTab,
+        ];
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts);
+
+        let at = |want: ChromeButton| {
+            frame
+                .actions
+                .iter()
+                .find(|(b, _)| *b == want)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("{want:?} should be placed"))
+        };
+
+        let last_tab = *frame.tabs.last().expect("two tabs");
+        assert_eq!(
+            at(ChromeButton::NewTab).x,
+            last_tab.right(),
+            "new-tab belongs against the tabs it adds to"
+        );
+        assert!(
+            at(ChromeButton::Settings).x > at(ChromeButton::NewTab).right(),
+            "the right-hand group stays past new-tab"
+        );
+        assert_eq!(
+            at(ChromeButton::Close).right(),
+            frame.tab_bar.right(),
+            "close sits in the far corner"
+        );
+    }
+
+    #[test]
+    fn tabs_stop_short_of_the_new_tab_button() {
+        let (mut layout, _) = Layout::new();
+        layout.new_tab();
+
+        let mut opts = opts_with_chrome();
+        opts.buttons = vec![ChromeButton::NewTab];
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts);
+
+        // Without the reservation the tabs would fill the strip and new-tab would be
+        // drawn on top of one, stealing its clicks.
+        let new_tab = frame.actions[0].1;
+        for tab in &frame.tabs {
+            assert!(
+                tab.right() <= new_tab.x,
+                "tab {tab:?} runs under the new-tab button at {new_tab:?}"
+            );
+        }
+        assert!(new_tab.right() <= frame.tab_bar.right());
     }
 
     #[test]

@@ -184,7 +184,7 @@ impl Default for Font {
             bold_family: None,
             italic_family: None,
             bold_italic_family: None,
-            size: 12.0,
+            size: 15.0,
             ligatures: false,
             features: BTreeMap::new(),
             // Emoji and CJK are the two fallbacks essentially every user needs,
@@ -225,7 +225,19 @@ pub struct Window {
     pub center_grid: bool,
     /// Window opacity, `0.0..=1.0`. Requires a compositor with alpha support.
     pub opacity: f32,
+    /// Draw the system title bar and border instead of Tuzminal's own.
+    ///
+    /// Defaults to **false**, because the built-in title bar is the one that carries
+    /// the tabs, the buttons and the rounded corners. Turning this on hands those
+    /// duties back to the compositor, and the window controls disappear from the
+    /// strip rather than being drawn twice.
     pub decorations: bool,
+    /// Radius, in pixels, of the window's rounded corners. `0.0` squares them off.
+    ///
+    /// Only has an effect without decorations, and only under a compositor that
+    /// supports transparency: the corners are rounded by making the pixels outside
+    /// the curve transparent, so with an opaque surface they would just show black.
+    pub corner_radius: f32,
     /// Initial size in cells.
     pub columns: u16,
     pub rows: u16,
@@ -234,7 +246,13 @@ pub struct Window {
     pub dynamic_title: bool,
     /// Pixel width of the divider drawn between splits.
     pub split_divider_width: u16,
-    /// Show the tab bar even when only one tab is open.
+    /// Show the tab strip even when only one tab is open.
+    ///
+    /// **Defaults to true, and turning it off hides the buttons too.** The strip
+    /// carries the new-tab, split and settings buttons as well as the tabs, so a
+    /// hidden strip leaves the terminal with no visible controls at all — which is
+    /// how this shipped once, and it made the whole button feature invisible on
+    /// first launch.
     pub always_show_tab_bar: bool,
 }
 
@@ -244,13 +262,14 @@ impl Default for Window {
             padding: Padding::default(),
             center_grid: true,
             opacity: 1.0,
-            decorations: true,
+            decorations: false,
+            corner_radius: 10.0,
             columns: 100,
             rows: 30,
             title: "Tuzminal".to_owned(),
             dynamic_title: true,
             split_divider_width: 1,
-            always_show_tab_bar: false,
+            always_show_tab_bar: true,
         }
     }
 }
@@ -620,6 +639,7 @@ impl Config {
             || self.window.center_grid != new.window.center_grid
             || self.window.split_divider_width != new.window.split_divider_width
             || self.window.always_show_tab_bar != new.window.always_show_tab_bar
+            || self.window.corner_radius != new.window.corner_radius
         {
             a.relayout = true;
             a.redraw = true;

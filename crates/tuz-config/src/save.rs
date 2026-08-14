@@ -398,7 +398,10 @@ opacity = 1.0
 
         let baseline = Config::default();
         let mut changed = baseline.clone();
-        changed.font.size = 15.0;
+        // Deliberately not the default size: a value equal to the default is not a
+        // change, so nothing would be written and the test would prove nothing.
+        changed.font.size = 17.0;
+        assert_ne!(changed.font.size, baseline.font.size);
 
         save_config(&dir.file(), &changed, &baseline).expect("save should succeed");
         let after = std::fs::read_to_string(dir.file()).unwrap();
@@ -417,7 +420,7 @@ opacity = 1.0
         }
 
         assert!(
-            after.contains("size = 15.0"),
+            after.contains("size = 17.0"),
             "the change should be present"
         );
     }

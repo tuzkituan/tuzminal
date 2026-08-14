@@ -770,6 +770,7 @@ fn the_tab_bar_draws_a_strip_with_a_distinguished_active_tab() {
         &labels,
         &theme,
         colors,
+        0.0,
     );
     assert!(!instances.is_empty());
 

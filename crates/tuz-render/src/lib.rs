@@ -358,8 +358,12 @@ mod tests {
         // The flag constants must agree between shader and Rust.
         assert!(src.contains("const FLAG_TEXTURED: u32 = 1u;"));
         assert!(src.contains("const FLAG_COLOR_GLYPH: u32 = 2u;"));
+        assert!(src.contains("const FLAG_ROUND_TOP: u32 = 4u;"));
+        assert!(src.contains("const FLAG_ROUND_BOTTOM: u32 = 8u;"));
         assert_eq!(FLAG_TEXTURED, 1);
         assert_eq!(FLAG_COLOR_GLYPH, 2);
+        assert_eq!(instance::FLAG_ROUND_TOP, 4);
+        assert_eq!(instance::FLAG_ROUND_BOTTOM, 8);
     }
 
     #[test]
@@ -367,7 +371,7 @@ mod tests {
         let layout = Instance::layout();
         assert_eq!(layout.array_stride, std::mem::size_of::<Instance>() as u64);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
-        assert_eq!(layout.attributes.len(), 5);
+        assert_eq!(layout.attributes.len(), 6);
     }
 
     #[test]
@@ -376,6 +380,6 @@ mod tests {
         // is garbled geometry rather than an error.
         let layout = Instance::layout();
         let offsets: Vec<u64> = layout.attributes.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 8, 16, 32, 48]);
+        assert_eq!(offsets, vec![0, 8, 16, 32, 48, 52]);
     }
 }

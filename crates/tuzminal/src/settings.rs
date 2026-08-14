@@ -40,6 +40,7 @@ mod ids {
     pub const OPACITY: WidgetId = WidgetId(12);
     pub const ALWAYS_TAB_BAR: WidgetId = WidgetId(13);
     pub const DECORATIONS: WidgetId = WidgetId(14);
+    pub const CORNER_RADIUS: WidgetId = WidgetId(15);
 
     pub const CURSOR_SHAPE: WidgetId = WidgetId(20);
     pub const CURSOR_BLINK: WidgetId = WidgetId(21);
@@ -203,6 +204,14 @@ impl SettingsPanel {
                 ids::DECORATIONS,
                 "Window decorations",
                 config.window.decorations,
+            ),
+            Widget::stepper(
+                ids::CORNER_RADIUS,
+                "Corner radius",
+                config.window.corner_radius,
+                0.0..=24.0,
+                1.0,
+                0,
             ),
             Widget::heading("Cursor"),
             Widget::select(
@@ -374,6 +383,7 @@ impl SettingsPanel {
                 ids::PADDING_X => set(&mut config.window.padding.x, value.round() as u16),
                 ids::PADDING_Y => set(&mut config.window.padding.y, value.round() as u16),
                 ids::OPACITY => set(&mut config.window.opacity, value),
+                ids::CORNER_RADIUS => set(&mut config.window.corner_radius, value),
                 ids::SCROLLBACK => set(&mut config.scrollback.lines, value.round() as u32),
                 ids::SCROLL_MULTIPLIER => set(
                     &mut config.scrollback.scroll_multiplier,

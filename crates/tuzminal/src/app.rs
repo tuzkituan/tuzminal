@@ -89,7 +89,13 @@ const RESIZE_STEP: f32 = 0.02;
 const DIVIDER_GRAB: u32 = 4;
 
 /// Vertical inset inside the tab and status strips.
-const CHROME_PADDING: u32 = 4;
+const CHROME_PADDING: u32 = 9;
+
+/// How close together two title-bar presses must be to count as a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How far apart they may be, in pixels, and still count. Without some slack a
+/// double-click fails whenever the pointer drifts by one pixel between presses.
+const DOUBLE_CLICK_SLOP: i32 = 4;
 
 /// Preferred and minimum tab widths in pixels.
 const TAB_WIDTH: u32 = 200;
@@ -141,6 +147,8 @@ pub struct App {
     dragging: Option<Vec<Branch>>,
     /// The chrome button under the pointer, for hover highlighting.
     hovered_button: Option<ChromeButton>,
+    /// When and where the title bar was last pressed, for double-click detection.
+    last_title_click: Option<(Instant, i32, i32)>,
     /// The tab under the pointer, so only that tab shows a close button.
     hovered_tab: Option<usize>,
     /// True when the pointer is over the hovered tab's close button.
@@ -266,6 +274,7 @@ impl App {
             selecting: None,
             dragging: None,
             hovered_button: None,
+            last_title_click: None,
             hovered_tab: None,
             hovered_close: false,
             panel: None,
@@ -342,6 +351,42 @@ impl App {
 
     /// Buttons for the tab strip, in right-to-left order.
     ///
+    /// The corner radius actually in effect.
+    ///
+    /// Zero with decorations on: the compositor owns the window's outline then, and
+    /// rounding ours inside its square frame would just carve holes in the corners.
+    fn corner_radius(cfg: &tuz_config::Config) -> f32 {
+        if cfg.window.decorations {
+            0.0
+        } else {
+            cfg.window.corner_radius.max(0.0)
+        }
+    }
+
+    /// The stretch of title bar occupied by neither a tab nor a button.
+    ///
+    /// This is both where the window title is drawn and what drags the window, so the
+    /// two are deliberately the same rect: whatever looks like empty bar is grabbable.
+    fn title_area(frame: &tuz_layout::Frame) -> Option<Rect> {
+        if frame.tab_bar.height == 0 {
+            return None;
+        }
+        let bar = frame.tab_bar;
+
+        // Left edge: past the last tab, and past new-tab if it follows them.
+        let mut left = frame.tabs.last().map(|t| t.right()).unwrap_or(bar.x);
+        let mut right = bar.right();
+        for (button, rect) in &frame.actions {
+            if button.leading() {
+                left = left.max(rect.right());
+            } else {
+                right = right.min(rect.x);
+            }
+        }
+
+        (right > left).then(|| Rect::new(left, bar.y, (right - left) as u32, bar.height))
+    }
+
     /// Window controls appear only without decorations: with them on, the compositor
     /// already draws a set and ours would sit beside a duplicate.
     fn chrome_buttons(&self) -> Vec<ChromeButton> {
@@ -507,6 +552,21 @@ impl App {
         let tab_titles: Vec<String> = (0..self.layout.tab_count())
             .map(|i| self.tab_title(i))
             .collect();
+
+        // What the system title bar would have shown, for the strip to show instead:
+        // whatever the focused program set, falling back to the configured name.
+        let window_title: String = self
+            .settings
+            .config()
+            .window
+            .dynamic_title
+            .then(|| self.titles.get(&self.layout.active_pane()).cloned())
+            .flatten()
+            .unwrap_or_else(|| self.settings.config().window.title.clone());
+
+        // A maximized window is flush with the screen edges, and rounding there just
+        // punches holes showing the desktop through the corners.
+        let maximized = self.window.as_ref().map(|w| w.is_maximized()).unwrap_or(false);
         let tab_activity: Vec<bool> = self
             .layout
             .tabs()
@@ -586,6 +646,25 @@ impl App {
         instances.clear();
         let mut ranges: Vec<(tuz_layout::Rect, std::ops::Range<u32>)> = Vec::new();
 
+        // With rounded corners the surface is cleared to fully transparent and the
+        // window's own background is this quad, so the pixels outside the curve stay
+        // transparent and the compositor shows what is behind. Clearing to the
+        // background color instead would paint square corners no later quad can undo.
+        let radius = if maximized { 0.0 } else { Self::corner_radius(cfg) };
+        if radius > 0.0 {
+            let window = Rect::from_size(gpu.size().0, gpu.size().1);
+            instances.push(Instance::rounded(
+                0.0,
+                0.0,
+                window.width as f32,
+                window.height as f32,
+                colors.convert(theme.background),
+                radius,
+                tuz_render::instance::FLAG_ROUND_TOP | tuz_render::instance::FLAG_ROUND_BOTTOM,
+            ));
+            ranges.push((window, 0..1));
+        }
+
         for geom in &frame.panes {
             let Some(session) = sessions.get(&geom.pane) else {
                 continue;
@@ -655,7 +734,25 @@ impl App {
                 &labels,
                 theme,
                 colors,
+                radius,
             );
+
+            // Without decorations the strip is the title bar, so it carries the
+            // window title. With them, the compositor already shows it above us and a
+            // second copy is just noise.
+            if !cfg.window.decorations {
+                if let Some(area) = Self::title_area(&frame) {
+                    tuz_render::chrome::draw_window_title(
+                        instances,
+                        fonts,
+                        area,
+                        &window_title,
+                        theme,
+                        colors,
+                    );
+                }
+            }
+
             tuz_render::chrome::draw_chrome_buttons(
                 instances,
                 fonts,
@@ -730,7 +827,13 @@ impl App {
         renderer.upload_atlas(gpu.device(), gpu.queue(), fonts.atlas_mut());
         renderer.upload_instances(gpu.device(), gpu.queue(), instances);
 
-        let clear = gpu.resolve_color(theme.background, cfg.window.opacity);
+        // A rounded window paints its own background quad, so the surface must clear
+        // to nothing at all — anything else fills the corners back in.
+        let clear = if radius > 0.0 {
+            wgpu::Color::TRANSPARENT
+        } else {
+            gpu.resolve_color(theme.background, cfg.window.opacity)
+        };
         let outcome = gpu.render(clear, |pass| {
             for (rect, range) in &ranges {
                 // Clip to the pane so an overhanging glyph — an italic descender,
@@ -1268,6 +1371,45 @@ impl App {
     }
 
     /// Act on a tab strip button.
+    /// Handle a left press on the empty stretch of the title bar.
+    ///
+    /// A second press within [`DOUBLE_CLICK`] and a few pixels toggles maximize;
+    /// otherwise the press begins a window drag. The order matters: `drag_window`
+    /// hands the pointer to the compositor and we stop seeing events, so the
+    /// double-click has to be decided first.
+    fn press_title_bar(&mut self, x: i32, y: i32) {
+        if self.settings.config().window.decorations {
+            return;
+        }
+        let now = Instant::now();
+        let double = self
+            .last_title_click
+            .map(|(at, px, py)| {
+                now.duration_since(at) < DOUBLE_CLICK
+                    && (x - px).abs() <= DOUBLE_CLICK_SLOP
+                    && (y - py).abs() <= DOUBLE_CLICK_SLOP
+            })
+            .unwrap_or(false);
+
+        if double {
+            self.last_title_click = None;
+            if let Some(w) = &self.window {
+                w.set_maximized(!w.is_maximized());
+            }
+            return;
+        }
+
+        self.last_title_click = Some((now, x, y));
+        if let Some(w) = &self.window {
+            // Failure is normal rather than exceptional: some platforms and some
+            // compositors refuse, and the only sane response is to leave the window
+            // where it is.
+            if let Err(e) = w.drag_window() {
+                log::debug!("compositor declined a window drag: {e}");
+            }
+        }
+    }
+
     fn press_chrome_button(&mut self, button: ChromeButton) {
         match button {
             ChromeButton::NewTab => {
@@ -1638,6 +1780,12 @@ impl App {
                 return;
             }
             if frame.is_chrome(x, y) {
+                // Empty title bar: drag moves the window, double-click maximizes it —
+                // what a system title bar does, and the reason this area is left
+                // clear of buttons.
+                if button == MouseButton::Left {
+                    self.press_title_bar(x, y);
+                }
                 return;
             }
 
@@ -2158,7 +2306,10 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title(&cfg.window.title)
             .with_decorations(cfg.window.decorations)
-            .with_transparent(cfg.window.opacity < 1.0)
+            // Rounded corners need an alpha channel just as much as opacity does:
+            // the corner pixels are transparent, and on an opaque surface they would
+            // come out black instead.
+            .with_transparent(cfg.window.opacity < 1.0 || cfg.window.corner_radius > 0.0)
             .with_inner_size(winit::dpi::LogicalSize::new(width, height));
 
         let window = match event_loop.create_window(attrs) {
@@ -2228,7 +2379,13 @@ impl ApplicationHandler<UserEvent> for App {
                     gpu.resize(size.width, size.height);
                 }
                 self.relayout();
-                self.request_redraw();
+                // Painted here and now rather than queued. `request_redraw` defers to
+                // the next loop iteration, which leaves the content one frame behind
+                // the border the compositor is already drawing at the new size — the
+                // lag you see as the window smearing while you drag its edge. Drawing
+                // synchronously keeps the two in step, and vsync throttles this
+                // naturally, so a burst of resize events cannot outrun the display.
+                self.redraw();
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {

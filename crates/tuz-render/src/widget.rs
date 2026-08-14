@@ -46,7 +46,8 @@ pub fn draw_panel_frame(
         uv: [0.0; 4],
         color: [r, g, b, 0.72],
         flags: 0,
-        _padding: [0; 3],
+        corner_radius: 0.0,
+        _padding: [0; 2],
     });
 
     // Border first, then the interior inset by the border width, which draws an

@@ -14,7 +14,7 @@ theme = "tuz-dark"
 
 [font]
 family = "monospace"
-size = 12.0
+size = 15.0
 
 # Enable programming ligatures (=>, !=, ...). Requires a font that has them,
 # such as Fira Code, JetBrains Mono or Cascadia Code.
@@ -54,7 +54,16 @@ center_grid = true
 # Needs a compositor that supports transparency.
 opacity = 1.0
 
-decorations = true
+# Draw the system title bar instead of Tuzminal's own. Off by default: the built-in
+# title bar is what carries the tabs, the buttons and the rounded corners, and with
+# this on the window controls move back to the compositor rather than being drawn
+# twice.
+decorations = false
+
+# Radius of the window's rounded corners, in pixels. 0 squares them off. Needs
+# `decorations = false` and a compositor with transparency — the corners are rounded
+# by leaving those pixels transparent.
+corner_radius = 10.0
 
 # Initial size, in cells.
 columns = 100
@@ -65,7 +74,11 @@ title = "Tuzminal"
 dynamic_title = true
 
 split_divider_width = 1
-always_show_tab_bar = false
+
+# The strip holds the new-tab, split and settings buttons as well as the tabs.
+# Turning this off with a single tab open hides the buttons along with it, leaving
+# no visible controls — keyboard shortcuts still work.
+always_show_tab_bar = true
 
 
 [cursor]

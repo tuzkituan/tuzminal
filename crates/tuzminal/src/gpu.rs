@@ -46,6 +46,14 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// Whether this config asks for rounded window corners.
+    ///
+    /// Decorations win: with the compositor drawing the frame, our rounding would cut
+    /// holes inside its square border rather than shaping the window.
+    fn rounds_corners(cfg: &Config) -> bool {
+        !cfg.window.decorations && cfg.window.corner_radius > 0.0
+    }
+
     /// Create a device and configure the window's surface.
     ///
     /// Blocking: wgpu's adapter and device requests are async, but there is
@@ -114,11 +122,19 @@ impl Gpu {
         }
         let format_is_srgb = config.format.is_srgb();
 
-        let want_transparency = cfg.window.opacity < 1.0;
+        // Rounded corners need a transparent surface for the same reason opacity
+        // does: the pixels outside the curve are written with zero alpha, and an
+        // opaque alpha mode turns them black instead of letting the desktop through.
+        let want_transparency = cfg.window.opacity < 1.0 || Self::rounds_corners(cfg);
         let (alpha_mode, premultiplied_alpha) =
             pick_alpha_mode(&caps.alpha_modes, want_transparency);
         config.alpha_mode = alpha_mode;
         config.present_mode = pick_present_mode(&caps.present_modes, cfg.performance.vsync);
+        // One frame in flight instead of the default two. A terminal renders a frame
+        // in well under a millisecond, so the extra buffering buys no smoothness and
+        // costs a frame of latency on every keystroke and every resize step — which
+        // is exactly the lag you feel dragging a window edge.
+        config.desired_maximum_frame_latency = 1;
 
         log::debug!(
             "surface: {:?} {:?} {:?} ({width}x{height})",
