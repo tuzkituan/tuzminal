@@ -43,9 +43,12 @@ mod ids {
 
     pub const CURSOR_SHAPE: WidgetId = WidgetId(20);
     pub const CURSOR_BLINK: WidgetId = WidgetId(21);
+    pub const CURSOR_BLINK_INTERVAL: WidgetId = WidgetId(22);
 
     pub const SCROLLBACK: WidgetId = WidgetId(30);
-    pub const VSYNC: WidgetId = WidgetId(31);
+    pub const SCROLL_MULTIPLIER: WidgetId = WidgetId(31);
+    pub const VSYNC: WidgetId = WidgetId(32);
+    pub const MAX_FPS: WidgetId = WidgetId(33);
 
     pub const SHELL_PROGRAM: WidgetId = WidgetId(40);
     pub const SHELL_ARGS: WidgetId = WidgetId(41);
@@ -209,6 +212,16 @@ impl SettingsPanel {
                 cursor_index,
             ),
             Widget::toggle(ids::CURSOR_BLINK, "Blink", config.cursor.blink),
+            Widget::stepper(
+                ids::CURSOR_BLINK_INTERVAL,
+                "Blink interval (ms)",
+                config.cursor.blink_interval_ms as f32,
+                // Floor matches the validator, which rejects anything under 50ms as
+                // a blink too fast to read.
+                50.0..=2000.0,
+                50.0,
+                0,
+            ),
             Widget::heading("Terminal"),
             Widget::stepper(
                 ids::SCROLLBACK,
@@ -218,7 +231,25 @@ impl SettingsPanel {
                 1_000.0,
                 0,
             ),
+            Widget::stepper(
+                ids::SCROLL_MULTIPLIER,
+                "Scroll multiplier",
+                config.scrollback.scroll_multiplier as f32,
+                1.0..=10.0,
+                1.0,
+                0,
+            ),
             Widget::toggle(ids::VSYNC, "VSync", config.performance.vsync),
+            Widget::stepper(
+                ids::MAX_FPS,
+                // Zero means unlimited, which the label says rather than leaving a
+                // bare 0 to be read as "no frames".
+                "Max FPS (0 = unlimited)",
+                config.performance.max_fps as f32,
+                0.0..=240.0,
+                10.0,
+                0,
+            ),
             Widget::heading("Shell"),
             Widget::text(
                 ids::SHELL_PROGRAM,
@@ -344,6 +375,14 @@ impl SettingsPanel {
                 ids::PADDING_Y => set(&mut config.window.padding.y, value.round() as u16),
                 ids::OPACITY => set(&mut config.window.opacity, value),
                 ids::SCROLLBACK => set(&mut config.scrollback.lines, value.round() as u32),
+                ids::SCROLL_MULTIPLIER => set(
+                    &mut config.scrollback.scroll_multiplier,
+                    value.round() as u8,
+                ),
+                ids::CURSOR_BLINK_INTERVAL => {
+                    set(&mut config.cursor.blink_interval_ms, value.round() as u64)
+                }
+                ids::MAX_FPS => set(&mut config.performance.max_fps, value.round() as u16),
                 _ => false,
             },
         };
