@@ -1,45 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="64" height="64"
-     shape-rendering="crispEdges">
-  <!-- Generated from GRID in crates/tuzminal/src/appicon.rs. Pixel art: one rect
-       per horizontal run, no curves, no antialiasing. `shape-rendering` is what
-       stops a renderer smoothing the edges that are the whole point. A test in
-       appicon.rs asserts this file and that grid paint the same cells. -->
-  <rect x="3" y="0" width="10" height="1" fill="#141720"/>
-  <rect x="2" y="1" width="12" height="1" fill="#141720"/>
-  <rect x="1" y="2" width="14" height="1" fill="#141720"/>
-  <rect x="0" y="3" width="16" height="1" fill="#141720"/>
-  <rect x="0" y="4" width="16" height="1" fill="#141720"/>
-  <rect x="0" y="5" width="3" height="1" fill="#141720"/>
-  <rect x="3" y="5" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="5" y="5" width="11" height="1" fill="#141720"/>
-  <rect x="0" y="6" width="4" height="1" fill="#141720"/>
-  <rect x="4" y="6" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="6" y="6" width="4" height="1" fill="#141720"/>
-  <rect x="10" y="6" width="3" height="1" fill="#e6e9f0"/>
-  <rect x="13" y="6" width="3" height="1" fill="#141720"/>
-  <rect x="0" y="7" width="5" height="1" fill="#141720"/>
-  <rect x="5" y="7" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="7" y="7" width="3" height="1" fill="#141720"/>
-  <rect x="10" y="7" width="3" height="1" fill="#e6e9f0"/>
-  <rect x="13" y="7" width="3" height="1" fill="#141720"/>
-  <rect x="0" y="8" width="5" height="1" fill="#141720"/>
-  <rect x="5" y="8" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="7" y="8" width="3" height="1" fill="#141720"/>
-  <rect x="10" y="8" width="3" height="1" fill="#e6e9f0"/>
-  <rect x="13" y="8" width="3" height="1" fill="#141720"/>
-  <rect x="0" y="9" width="4" height="1" fill="#141720"/>
-  <rect x="4" y="9" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="6" y="9" width="4" height="1" fill="#141720"/>
-  <rect x="10" y="9" width="3" height="1" fill="#e6e9f0"/>
-  <rect x="13" y="9" width="3" height="1" fill="#141720"/>
-  <rect x="0" y="10" width="3" height="1" fill="#141720"/>
-  <rect x="3" y="10" width="2" height="1" fill="#5cf0d4"/>
-  <rect x="5" y="10" width="5" height="1" fill="#141720"/>
-  <rect x="10" y="10" width="3" height="1" fill="#e6e9f0"/>
-  <rect x="13" y="10" width="3" height="1" fill="#141720"/>
-  <rect x="0" y="11" width="16" height="1" fill="#141720"/>
-  <rect x="0" y="12" width="16" height="1" fill="#141720"/>
-  <rect x="1" y="13" width="14" height="1" fill="#141720"/>
-  <rect x="2" y="14" width="12" height="1" fill="#141720"/>
-  <rect x="3" y="15" width="10" height="1" fill="#141720"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="64" height="64">
+  <!-- Generated from GRID in crates/tuzminal/src/appicon.rs. The tile is a normally
+       rounded rectangle; only the glyphs on it are pixel art, which is why
+       `shape-rendering` is set on the group holding them and not on the tile —
+       the corner wants antialiasing and the glyphs do not. A test in appicon.rs
+       asserts this file and that grid agree. -->
+  <rect x="0" y="0" width="16" height="16" rx="3.36" fill="#141720"/>
+  <g shape-rendering="crispEdges">
+    <rect x="3" y="5" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="4" y="6" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="10" y="6" width="3" height="1" fill="#e6e9f0"/>
+    <rect x="5" y="7" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="10" y="7" width="3" height="1" fill="#e6e9f0"/>
+    <rect x="5" y="8" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="10" y="8" width="3" height="1" fill="#e6e9f0"/>
+    <rect x="4" y="9" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="10" y="9" width="3" height="1" fill="#e6e9f0"/>
+    <rect x="3" y="10" width="2" height="1" fill="#5cf0d4"/>
+    <rect x="10" y="10" width="3" height="1" fill="#e6e9f0"/>
+  </g>
 </svg>
