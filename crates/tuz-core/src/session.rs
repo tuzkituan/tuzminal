@@ -353,6 +353,34 @@ impl Session {
         self.term.lock().clear_screen(ClearMode::Saved);
     }
 
+    /// Select the entire buffer, scrollback included.
+    ///
+    /// Spans from the topmost line of history to the last column of the bottom line,
+    /// so `copy` afterwards yields everything the terminal is holding — not just the
+    /// visible screen, which is what makes the action worth having.
+    pub fn select_all(&self) {
+        use alacritty_terminal::index::{Column, Point, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+
+        let mut term = self.term.lock();
+        let topmost = term.grid().topmost_line();
+        let bottommost = term.grid().bottommost_line();
+        let last_column = Column(term.grid().columns().saturating_sub(1));
+
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(topmost, Column(0)),
+            Side::Left,
+        );
+        selection.update(Point::new(bottommost, last_column), Side::Right);
+        term.selection = Some(selection);
+    }
+
+    /// Clear any selection.
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
     /// The current selection as text, if any.
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string()
@@ -582,5 +610,70 @@ mod tests {
         assert!(s.child_exited());
         // Must not panic: a keystroke arriving after the shell exits is normal.
         s.write(b"x".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod select_all_tests {
+    use super::*;
+
+    fn session(cols: u16, rows: u16) -> Session {
+        Session::detached(PaneId(1), TermSize::new(cols, rows, 8, 16))
+    }
+
+    #[test]
+    fn select_all_captures_the_visible_screen() {
+        let s = session(20, 3);
+        s.feed_for_test(b"hello\r\nworld");
+        s.select_all();
+
+        let text = s.selection_text().expect("something should be selected");
+        assert!(text.contains("hello"), "got {text:?}");
+        assert!(text.contains("world"), "got {text:?}");
+    }
+
+    #[test]
+    fn select_all_reaches_into_scrollback() {
+        // The reason the action is worth having: selecting only the visible screen
+        // is what dragging already does.
+        let s = session(20, 2);
+        s.feed_for_test(b"oldest\r\nmiddle\r\nnewest\r\n");
+        s.select_all();
+
+        let text = s.selection_text().expect("something should be selected");
+        assert!(
+            text.contains("oldest"),
+            "scrolled-off content should be included, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn select_all_includes_the_last_column() {
+        // An off-by-one on the end column silently truncates every line.
+        let s = session(5, 2);
+        s.feed_for_test(b"abcde");
+        s.select_all();
+
+        let text = s.selection_text().unwrap();
+        assert!(text.contains("abcde"), "got {text:?}");
+    }
+
+    #[test]
+    fn clearing_removes_the_selection() {
+        let s = session(20, 3);
+        s.feed_for_test(b"hi");
+        s.select_all();
+        assert!(s.selection_text().is_some());
+
+        s.clear_selection();
+        assert!(s.selection_text().is_none());
+    }
+
+    #[test]
+    fn select_all_on_an_empty_terminal_does_not_panic() {
+        let s = session(20, 3);
+        s.select_all();
+        // Whitespace or nothing, but it must not crash on a grid of blanks.
+        let _ = s.selection_text();
     }
 }

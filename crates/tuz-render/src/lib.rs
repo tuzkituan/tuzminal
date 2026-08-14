@@ -17,7 +17,9 @@ pub mod instance;
 pub mod text;
 pub mod widget;
 
-pub use chrome::{draw_chrome_buttons, draw_status_bar, draw_tab_bar, StatusItem, TabLabel};
+pub use chrome::{
+    draw_chrome_buttons, draw_status_bar, draw_tab_bar, draw_tooltip, StatusItem, TabLabel,
+};
 pub use instance::{
     build_pane, ColorSpace, Instance, PaneGeometry, FLAG_COLOR_GLYPH, FLAG_TEXTURED,
 };

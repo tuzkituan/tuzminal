@@ -72,6 +72,21 @@ pub enum Widget {
         options: Vec<String>,
         index: usize,
     },
+    /// An editable line of text.
+    ///
+    /// Deliberately minimal: a caret, insertion, deletion and horizontal movement.
+    /// No selection, no clipboard, no IME — those belong to the terminal grid, and a
+    /// settings field that grows them becomes a second text editor to maintain.
+    Text {
+        id: WidgetId,
+        label: String,
+        value: String,
+        /// Caret position, in **characters** not bytes, so multi-byte input cannot
+        /// split a character and panic on the next slice.
+        caret: usize,
+        /// Shown greyed when the value is empty.
+        placeholder: String,
+    },
     /// A number adjusted by a fixed step.
     Stepper {
         id: WidgetId,
@@ -140,6 +155,25 @@ impl Widget {
         }
     }
 
+    pub fn text(
+        id: WidgetId,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+    ) -> Self {
+        let value: String = value.into();
+        // Caret starts at the end, which is where someone editing an existing value
+        // wants it.
+        let caret = value.chars().count();
+        Widget::Text {
+            id,
+            label: label.into(),
+            value,
+            caret,
+            placeholder: placeholder.into(),
+        }
+    }
+
     pub fn stepper(
         id: WidgetId,
         label: impl Into<String>,
@@ -166,6 +200,7 @@ impl Widget {
             Widget::Button { id, .. }
             | Widget::Toggle { id, .. }
             | Widget::Select { id, .. }
+            | Widget::Text { id, .. }
             | Widget::Stepper { id, .. } => Some(*id),
         }
     }
@@ -200,8 +235,27 @@ impl Widget {
             Widget::Stepper {
                 value, decimals, ..
             } => Some(format!("‹ {value:.*} ›", *decimals as usize)),
+            Widget::Text {
+                value, placeholder, ..
+            } => Some(if value.is_empty() {
+                placeholder.clone()
+            } else {
+                value.clone()
+            }),
         }
     }
+}
+
+/// Byte offset of the `n`th character.
+///
+/// Every edit goes through this rather than indexing bytes directly: `String::insert`
+/// and `remove` take byte offsets and panic on a boundary inside a multi-byte
+/// character, so a caret counted in characters must be converted before use.
+fn char_to_byte(text: &str, n: usize) -> usize {
+    text.char_indices()
+        .nth(n)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
 }
 
 /// A widget with its computed position.
@@ -226,12 +280,15 @@ impl Placed {
 /// Each variant carries the *resulting* value rather than a delta, so the caller
 /// applies it without re-deriving anything and cannot disagree with the UI about
 /// what the new value is.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     Pressed(WidgetId),
     Toggled(WidgetId, bool),
     Selected(WidgetId, usize),
     Changed(WidgetId, f32),
+    /// A text field's new contents. Carries the whole value rather than a delta, so
+    /// the caller never has to replay edits to work out what it now says.
+    Edited(WidgetId, String),
 }
 
 impl UiAction {
@@ -241,6 +298,7 @@ impl UiAction {
             | UiAction::Toggled(id, _)
             | UiAction::Selected(id, _)
             | UiAction::Changed(id, _) => *id,
+            UiAction::Edited(id, _) => *id,
         }
     }
 }
@@ -256,6 +314,11 @@ pub enum UiKey {
     Right,
     Activate,
     Escape,
+    /// Editing keys, meaningful only when a text field has focus.
+    Backspace,
+    Delete,
+    Home,
+    End,
 }
 
 /// How the UI responded to a key.
@@ -528,6 +591,10 @@ impl Ui {
                 let forward = x >= placed.value_rect.center_x();
                 self.adjust(index, forward)
             }
+            // Clicking a text field focuses it so typing goes there; it does not
+            // move the caret, since that needs per-character hit-testing the widget
+            // does not carry.
+            Widget::Text { .. } => None,
             Widget::Label { .. } => None,
         }
     }
@@ -546,10 +613,28 @@ impl Ui {
                 KeyResponse::Consumed
             }
 
+            UiKey::Backspace | UiKey::Delete | UiKey::Home | UiKey::End => {
+                let Some(index) = self.focus.and_then(|id| self.index_of(id)) else {
+                    return KeyResponse::Consumed;
+                };
+                self.edit(index, key)
+            }
+
             UiKey::Left | UiKey::Right => {
                 let Some(index) = self.focus.and_then(|id| self.index_of(id)) else {
                     return KeyResponse::Consumed;
                 };
+                // In a text field the arrows move the caret rather than adjusting a
+                // value, which is what anyone typing expects them to do.
+                if let Widget::Text { caret, value, .. } = &mut self.placed[index].widget {
+                    let len = value.chars().count();
+                    *caret = if key == UiKey::Right {
+                        (*caret + 1).min(len)
+                    } else {
+                        caret.saturating_sub(1)
+                    };
+                    return KeyResponse::Consumed;
+                }
                 // A toggle responds to left/right too: it is the only sensible
                 // reading of "adjust this value" for a boolean.
                 if let Widget::Toggle { id, on, .. } = &self.placed[index].widget {
@@ -582,7 +667,9 @@ impl Ui {
                             None => KeyResponse::Consumed,
                         }
                     }
-                    Widget::Label { .. } => KeyResponse::Consumed,
+                    // Enter in a text field commits nothing extra: edits are already
+                    // reported as they are typed.
+                    Widget::Text { .. } | Widget::Label { .. } => KeyResponse::Consumed,
                 }
             }
         }
@@ -632,6 +719,70 @@ impl Ui {
             }
 
             _ => None,
+        }
+    }
+
+    /// Insert a typed character into the focused text field.
+    ///
+    /// Returns the resulting action, or `None` when focus is not on a text field —
+    /// which is how the caller knows whether the character was consumed or should
+    /// fall through.
+    pub fn type_char(&mut self, c: char) -> Option<UiAction> {
+        // Control characters arrive as their own keys; letting them into the buffer
+        // would put literal escape bytes in a config value.
+        if c.is_control() {
+            return None;
+        }
+        let index = self.focus.and_then(|id| self.index_of(id))?;
+        let Widget::Text {
+            id, value, caret, ..
+        } = &mut self.placed[index].widget
+        else {
+            return None;
+        };
+
+        let byte = char_to_byte(value, *caret);
+        value.insert(byte, c);
+        *caret += 1;
+        Some(UiAction::Edited(*id, value.clone()))
+    }
+
+    /// Apply an editing key to a text field.
+    fn edit(&mut self, index: usize, key: UiKey) -> KeyResponse {
+        let Widget::Text {
+            id, value, caret, ..
+        } = &mut self.placed[index].widget
+        else {
+            return KeyResponse::Consumed;
+        };
+
+        match key {
+            UiKey::Home => {
+                *caret = 0;
+                KeyResponse::Consumed
+            }
+            UiKey::End => {
+                *caret = value.chars().count();
+                KeyResponse::Consumed
+            }
+            UiKey::Backspace => {
+                if *caret == 0 {
+                    return KeyResponse::Consumed;
+                }
+                let byte = char_to_byte(value, *caret - 1);
+                value.remove(byte);
+                *caret -= 1;
+                KeyResponse::Action(UiAction::Edited(*id, value.clone()))
+            }
+            UiKey::Delete => {
+                if *caret >= value.chars().count() {
+                    return KeyResponse::Consumed;
+                }
+                let byte = char_to_byte(value, *caret);
+                value.remove(byte);
+                KeyResponse::Action(UiAction::Edited(*id, value.clone()))
+            }
+            _ => KeyResponse::Consumed,
         }
     }
 
@@ -1411,5 +1562,220 @@ mod scroll_tests {
                 small()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod text_input_tests {
+    use super::*;
+
+    fn field(value: &str) -> Ui {
+        let mut ui = Ui::new();
+        ui.layout(
+            &[Widget::text(WidgetId(1), "Program", value, "$SHELL")],
+            Rect::new(0, 0, 400, 200),
+            20,
+        );
+        ui.focus(WidgetId(1));
+        ui
+    }
+
+    fn value_of(ui: &Ui) -> String {
+        match &ui.placed()[0].widget {
+            Widget::Text { value, .. } => value.clone(),
+            other => panic!("expected a text field, got {other:?}"),
+        }
+    }
+
+    fn caret_of(ui: &Ui) -> usize {
+        match &ui.placed()[0].widget {
+            Widget::Text { caret, .. } => *caret,
+            other => panic!("expected a text field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_caret_starts_at_the_end_of_an_existing_value() {
+        // Someone editing an existing setting wants to append, not prepend.
+        let ui = field("/bin/zsh");
+        assert_eq!(caret_of(&ui), 8);
+    }
+
+    #[test]
+    fn typing_inserts_at_the_caret() {
+        let mut ui = field("bin");
+        assert_eq!(
+            ui.type_char('!'),
+            Some(UiAction::Edited(WidgetId(1), "bin!".to_owned()))
+        );
+        assert_eq!(value_of(&ui), "bin!");
+        assert_eq!(caret_of(&ui), 4);
+    }
+
+    #[test]
+    fn typing_in_the_middle_inserts_rather_than_appends() {
+        let mut ui = field("ac");
+        ui.key(UiKey::Left);
+        ui.type_char('b');
+        assert_eq!(value_of(&ui), "abc");
+    }
+
+    #[test]
+    fn control_characters_are_refused() {
+        // Otherwise a stray escape byte ends up inside a config value.
+        let mut ui = field("x");
+        assert_eq!(ui.type_char('\n'), None);
+        assert_eq!(ui.type_char('\t'), None);
+        assert_eq!(ui.type_char('\u{1b}'), None);
+        assert_eq!(value_of(&ui), "x");
+    }
+
+    #[test]
+    fn typing_with_focus_elsewhere_is_not_consumed() {
+        // The `None` is how the caller knows to let the key fall through.
+        let mut ui = Ui::new();
+        ui.layout(
+            &[Widget::toggle(WidgetId(1), "Ligatures", false)],
+            Rect::new(0, 0, 400, 200),
+            20,
+        );
+        ui.focus(WidgetId(1));
+        assert_eq!(ui.type_char('a'), None);
+    }
+
+    #[test]
+    fn backspace_deletes_before_the_caret() {
+        let mut ui = field("abc");
+        assert_eq!(
+            ui.key(UiKey::Backspace),
+            KeyResponse::Action(UiAction::Edited(WidgetId(1), "ab".to_owned()))
+        );
+        assert_eq!(caret_of(&ui), 2);
+    }
+
+    #[test]
+    fn backspace_at_the_start_does_nothing() {
+        let mut ui = field("abc");
+        ui.key(UiKey::Home);
+        assert_eq!(ui.key(UiKey::Backspace), KeyResponse::Consumed);
+        assert_eq!(value_of(&ui), "abc");
+    }
+
+    #[test]
+    fn delete_removes_after_the_caret() {
+        let mut ui = field("abc");
+        ui.key(UiKey::Home);
+        assert_eq!(
+            ui.key(UiKey::Delete),
+            KeyResponse::Action(UiAction::Edited(WidgetId(1), "bc".to_owned()))
+        );
+        assert_eq!(caret_of(&ui), 0, "the caret should not move");
+    }
+
+    #[test]
+    fn delete_at_the_end_does_nothing() {
+        let mut ui = field("abc");
+        assert_eq!(ui.key(UiKey::Delete), KeyResponse::Consumed);
+        assert_eq!(value_of(&ui), "abc");
+    }
+
+    #[test]
+    fn home_and_end_move_the_caret_to_the_edges() {
+        let mut ui = field("hello");
+        ui.key(UiKey::Home);
+        assert_eq!(caret_of(&ui), 0);
+        ui.key(UiKey::End);
+        assert_eq!(caret_of(&ui), 5);
+    }
+
+    #[test]
+    fn arrows_move_the_caret_and_clamp_at_both_ends() {
+        let mut ui = field("ab");
+        ui.key(UiKey::Left);
+        assert_eq!(caret_of(&ui), 1);
+        ui.key(UiKey::Left);
+        ui.key(UiKey::Left);
+        assert_eq!(caret_of(&ui), 0, "cannot go before the start");
+
+        ui.key(UiKey::Right);
+        ui.key(UiKey::Right);
+        ui.key(UiKey::Right);
+        assert_eq!(caret_of(&ui), 2, "cannot go past the end");
+    }
+
+    #[test]
+    fn arrows_in_a_text_field_do_not_emit_a_value_change() {
+        // In a stepper the arrows adjust; in a text field they must only navigate.
+        let mut ui = field("ab");
+        assert_eq!(ui.key(UiKey::Left), KeyResponse::Consumed);
+        assert_eq!(ui.key(UiKey::Right), KeyResponse::Consumed);
+    }
+
+    #[test]
+    fn multi_byte_characters_are_edited_without_splitting_them() {
+        // The caret counts characters but String::remove takes bytes; conflating the
+        // two panics on a boundary inside a multi-byte character.
+        let mut ui = field("日本語");
+        assert_eq!(caret_of(&ui), 3, "three characters, nine bytes");
+
+        assert_eq!(
+            ui.key(UiKey::Backspace),
+            KeyResponse::Action(UiAction::Edited(WidgetId(1), "日本".to_owned()))
+        );
+
+        ui.key(UiKey::Home);
+        assert_eq!(
+            ui.key(UiKey::Delete),
+            KeyResponse::Action(UiAction::Edited(WidgetId(1), "本".to_owned()))
+        );
+
+        ui.type_char('é');
+        assert_eq!(value_of(&ui), "é本");
+    }
+
+    #[test]
+    fn editing_an_empty_field_is_safe() {
+        let mut ui = field("");
+        assert_eq!(caret_of(&ui), 0);
+        assert_eq!(ui.key(UiKey::Backspace), KeyResponse::Consumed);
+        assert_eq!(ui.key(UiKey::Delete), KeyResponse::Consumed);
+        ui.key(UiKey::Left);
+        ui.key(UiKey::Right);
+        assert_eq!(value_of(&ui), "");
+    }
+
+    #[test]
+    fn an_empty_field_displays_its_placeholder() {
+        let ui = field("");
+        assert_eq!(ui.placed()[0].widget.value_text().unwrap(), "$SHELL");
+
+        let ui = field("/bin/fish");
+        assert_eq!(ui.placed()[0].widget.value_text().unwrap(), "/bin/fish");
+    }
+
+    #[test]
+    fn a_text_field_takes_focus_and_participates_in_tab_order() {
+        let mut ui = Ui::new();
+        ui.layout(
+            &[
+                Widget::toggle(WidgetId(1), "a", false),
+                Widget::text(WidgetId(2), "Program", "", ""),
+                Widget::button(WidgetId(3), "Apply"),
+            ],
+            Rect::new(0, 0, 400, 300),
+            20,
+        );
+        ui.key(UiKey::Tab);
+        ui.key(UiKey::Tab);
+        assert_eq!(ui.focused(), Some(WidgetId(2)));
+    }
+
+    #[test]
+    fn clicking_a_text_field_focuses_without_editing() {
+        let mut ui = field("abc");
+        let rect = ui.rect_of(WidgetId(1)).unwrap();
+        assert_eq!(ui.click(rect.center_x(), rect.center_y()), None);
+        assert_eq!(ui.focused(), Some(WidgetId(1)));
+        assert_eq!(value_of(&ui), "abc");
     }
 }

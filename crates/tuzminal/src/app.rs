@@ -597,6 +597,17 @@ impl App {
                 theme,
                 colors,
             );
+
+            // After the strip, so it overlaps the tabs below rather than being
+            // painted over by them.
+            if let Some(button) = hovered_button {
+                if let Some((_, anchor)) = frame.actions.iter().find(|(b, _)| *b == button) {
+                    let window = Rect::from_size(gpu.size().0, gpu.size().1);
+                    tuz_render::draw_tooltip(
+                        instances, fonts, button, *anchor, window, theme, colors,
+                    );
+                }
+            }
         }
 
         if frame.status_bar.height > 0 {
@@ -868,7 +879,12 @@ impl App {
 
             Copy => self.copy_selection(),
             Paste => self.paste(),
-            SelectAll => log::debug!("select_all is not implemented yet"),
+            SelectAll => {
+                if let Some(session) = self.focused_session() {
+                    session.select_all();
+                }
+                self.request_redraw();
+            }
 
             IncreaseFontSize => self.adjust_font_size(1.0),
             DecreaseFontSize => self.adjust_font_size(-1.0),
@@ -1291,6 +1307,29 @@ impl App {
                 self.close_settings();
                 return;
             }
+            // A printable character with no ctrl/alt/super goes into a focused text
+            // field. Checked before `panel_key` so a plain `d` types rather than
+            // being mistaken for a navigation key.
+            if !self.modifiers.control_key()
+                && !self.modifiers.alt_key()
+                && !self.modifiers.super_key()
+            {
+                if let Some(text) = event.text.as_deref() {
+                    let mut edited = None;
+                    if let Some(panel) = self.panel.as_mut() {
+                        for c in text.chars() {
+                            if let Some(action) = panel.ui.type_char(c) {
+                                edited = Some(action);
+                            }
+                        }
+                    }
+                    if let Some(action) = edited {
+                        self.handle_panel_action(action);
+                        return;
+                    }
+                }
+            }
+
             if let Some(key) = panel_key(&chord) {
                 let response = match self.panel.as_mut() {
                     Some(panel) => panel.ui.key(key),
@@ -1867,7 +1906,14 @@ fn panel_key(chord: &tuz_input::KeyChord) -> Option<UiKey> {
         Key::Named(NamedKey::Down) => UiKey::Down,
         Key::Named(NamedKey::Left) => UiKey::Left,
         Key::Named(NamedKey::Right) => UiKey::Right,
-        Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => UiKey::Activate,
+        Key::Named(NamedKey::Enter) => UiKey::Activate,
+        // Space activates a button or toggle, but must be typable in a text field;
+        // `type_char` runs first and consumes it there.
+        Key::Named(NamedKey::Space) => UiKey::Activate,
+        Key::Named(NamedKey::Backspace) => UiKey::Backspace,
+        Key::Named(NamedKey::Delete) => UiKey::Delete,
+        Key::Named(NamedKey::Home) => UiKey::Home,
+        Key::Named(NamedKey::End) => UiKey::End,
         _ => return None,
     })
 }

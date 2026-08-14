@@ -310,6 +310,68 @@ pub fn draw_status_bar(
     }
 }
 
+/// Draw a tooltip below a hovered chrome button.
+///
+/// The strip buttons are bare glyphs. `+` and `×` are self-evident; the split
+/// buttons are not, and a control nobody can identify may as well not be there.
+///
+/// Drawn after the strip and clamped to the window, so a button near the right edge
+/// gets a tooltip that shifts left rather than one that runs off-screen.
+pub fn draw_tooltip(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    button: ChromeButton,
+    anchor: Rect,
+    window: Rect,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    let text = button.describe();
+    let metrics = fonts.metrics();
+    let width = text::measure(text, metrics.width as f32) as u32 + (PADDING * 2.0) as u32;
+    let height = metrics.height + 6;
+
+    // Centred under the button, then pulled inside the window.
+    let mut x = anchor.center_x() - (width / 2) as i32;
+    x = x.clamp(window.x, (window.right() - width as i32).max(window.x));
+    let y = anchor.bottom() + 2;
+
+    // A tooltip that would fall outside the window vertically is simply not drawn:
+    // better absent than clipped to a sliver.
+    if y + height as i32 > window.bottom() {
+        return;
+    }
+
+    let rect = Rect::new(x, y, width, height);
+    out.push(Instance::solid(
+        rect.x as f32,
+        rect.y as f32,
+        rect.width as f32,
+        rect.height as f32,
+        colors.convert_opaque(theme.split_divider()),
+    ));
+    let inner = rect.inset(1, 1);
+    out.push(Instance::solid(
+        inner.x as f32,
+        inner.y as f32,
+        inner.width as f32,
+        inner.height as f32,
+        colors.convert_opaque(theme.background_focused()),
+    ));
+
+    text::draw_in_box(
+        out,
+        fonts,
+        text,
+        rect,
+        PADDING,
+        Align::Center,
+        theme.foreground,
+        colors,
+        Style::Regular,
+    );
+}
+
 /// Parse a plugin-supplied color, ignoring anything malformed.
 ///
 /// A plugin sending a bad color should lose that color, not crash the frame or

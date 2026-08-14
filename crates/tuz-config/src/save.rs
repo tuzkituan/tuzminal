@@ -71,15 +71,21 @@ pub fn save_config(path: &Path, config: &Config, baseline: &Config) -> Result<Pa
 struct Change {
     /// e.g. `["font", "size"]`, or `["theme"]` for a top-level key.
     path: Vec<&'static str>,
-    value: Value,
+    /// `None` deletes the key, which is how an `Option` setting returns to its
+    /// default rather than being written as an empty value the loader would reject.
+    value: Option<Value>,
 }
 
 impl Change {
     fn new(path: Vec<&'static str>, value: impl Into<Value>) -> Self {
         Self {
             path,
-            value: value.into(),
+            value: Some(value.into()),
         }
+    }
+
+    fn remove(path: Vec<&'static str>) -> Self {
+        Self { path, value: None }
     }
 }
 
@@ -188,6 +194,28 @@ fn collect_changes(new: &Config, old: &Config) -> Vec<Change> {
         |v: u8| v as i64
     );
 
+    // [shell]
+    compare!(
+        vec!["shell", "term"],
+        |c: &Config| c.shell.term.clone(),
+        |v: String| v
+    );
+    // `program` is Option: absent means "use $SHELL". Writing an empty string
+    // instead would try to exec a program with no name.
+    if new.shell.program != old.shell.program {
+        match &new.shell.program {
+            Some(program) => changes.push(Change::new(vec!["shell", "program"], program.clone())),
+            None => changes.push(Change::remove(vec!["shell", "program"])),
+        }
+    }
+    if new.shell.args != old.shell.args {
+        let mut array = toml_edit::Array::new();
+        for arg in &new.shell.args {
+            array.push(arg.as_str());
+        }
+        changes.push(Change::new(vec!["shell", "args"], array));
+    }
+
     // [performance]
     compare!(
         vec!["performance", "vsync"],
@@ -238,6 +266,11 @@ fn apply(doc: &mut DocumentMut, change: &Change) {
         table = entry.as_table_mut().expect("just ensured this is a table");
     }
 
+    let Some(new_value) = change.value.clone() else {
+        table.remove(last);
+        return;
+    };
+
     // Preserve the surrounding whitespace of the value being replaced, so a
     // carefully aligned file stays aligned.
     let decor = table
@@ -245,7 +278,7 @@ fn apply(doc: &mut DocumentMut, change: &Change) {
         .and_then(|item| item.as_value())
         .map(|v| v.decor().clone());
 
-    let mut value = change.value.clone();
+    let mut value = new_value;
     if let Some(decor) = decor {
         *value.decor_mut() = decor;
     }
@@ -663,5 +696,99 @@ opacity = 1.0
                 .unwrap_or_else(|e| panic!("`{name}` should be a valid shape: {e}"));
             assert_eq!(parsed.cursor.shape, shape);
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_save_tests {
+    use super::*;
+
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let p: PathBuf =
+                std::env::temp_dir().join(format!("tuz-shell-save-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn file(&self) -> PathBuf {
+            self.0.join("config.toml")
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn shell_settings_round_trip() {
+        let dir = Dir::new("roundtrip");
+        let baseline = Config::default();
+        let mut changed = baseline.clone();
+        changed.shell.program = Some("/usr/bin/fish".to_owned());
+        changed.shell.args = vec!["--login".to_owned(), "-c".to_owned()];
+        changed.shell.term = "xterm-256color".to_owned();
+
+        save_config(&dir.file(), &changed, &baseline).unwrap();
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(dir.file()).unwrap()).expect("must parse");
+
+        assert_eq!(parsed.shell.program.as_deref(), Some("/usr/bin/fish"));
+        assert_eq!(parsed.shell.args, vec!["--login", "-c"]);
+    }
+
+    #[test]
+    fn clearing_the_program_removes_the_key_rather_than_writing_an_empty_string() {
+        // `program = ""` would try to exec a program with no name. Absent means
+        // "use $SHELL", so returning to the default has to delete the key.
+        let dir = Dir::new("clear");
+        std::fs::write(
+            dir.file(),
+            "[shell]\nprogram = \"/usr/bin/fish\"\nterm = \"xterm-256color\"\n",
+        )
+        .unwrap();
+
+        let mut baseline = Config::default();
+        baseline.shell.program = Some("/usr/bin/fish".to_owned());
+        let changed = Config::default(); // program back to None
+
+        save_config(&dir.file(), &changed, &baseline).unwrap();
+        let text = std::fs::read_to_string(dir.file()).unwrap();
+
+        assert!(
+            !text.contains("program"),
+            "the key should be gone, not blank:\n{text}"
+        );
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.shell.program, None);
+        assert_eq!(parsed.shell.term, "xterm-256color", "siblings survive");
+    }
+
+    #[test]
+    fn empty_args_are_written_as_an_empty_array() {
+        let dir = Dir::new("args");
+        let mut baseline = Config::default();
+        baseline.shell.args = vec!["--login".to_owned()];
+        let changed = Config::default();
+
+        save_config(&dir.file(), &changed, &baseline).unwrap();
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(dir.file()).unwrap()).expect("must parse");
+        assert!(parsed.shell.args.is_empty());
+    }
+
+    #[test]
+    fn a_saved_shell_config_still_validates() {
+        let dir = Dir::new("valid");
+        let baseline = Config::default();
+        let mut changed = baseline.clone();
+        changed.shell.program = Some("/bin/sh".to_owned());
+        changed.shell.term = "screen-256color".to_owned();
+
+        save_config(&dir.file(), &changed, &baseline).unwrap();
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(dir.file()).unwrap()).unwrap();
+        parsed.validate().expect("must be valid");
     }
 }

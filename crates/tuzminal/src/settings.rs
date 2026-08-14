@@ -16,6 +16,10 @@
 //! - **Revert** restores the config as it was when the panel opened.
 //! - **Escape** closes and keeps unsaved changes for the session, matching how the
 //!   existing `increase_font_size` keybinding already behaves.
+//!
+//! One exception to "live": the `[shell]` settings only affect panes opened *after*
+//! the change. A running shell cannot be swapped underneath itself, and restarting it
+//! would discard whatever the user was doing.
 
 use tuz_config::{Config, CursorShape, Theme};
 use tuz_ui::{Ui, UiAction, Widget};
@@ -42,6 +46,10 @@ mod ids {
 
     pub const SCROLLBACK: WidgetId = WidgetId(30);
     pub const VSYNC: WidgetId = WidgetId(31);
+
+    pub const SHELL_PROGRAM: WidgetId = WidgetId(40);
+    pub const SHELL_ARGS: WidgetId = WidgetId(41);
+    pub const TERM: WidgetId = WidgetId(42);
 
     pub const SAVE: WidgetId = WidgetId(90);
     pub const REVERT: WidgetId = WidgetId(91);
@@ -211,6 +219,28 @@ impl SettingsPanel {
                 0,
             ),
             Widget::toggle(ids::VSYNC, "VSync", config.performance.vsync),
+            Widget::heading("Shell"),
+            Widget::text(
+                ids::SHELL_PROGRAM,
+                "Program",
+                config.shell.program.clone().unwrap_or_default(),
+                "$SHELL",
+            ),
+            // Space-separated rather than a list editor: shell arguments are almost
+            // always one or two flags, and a full list widget would be more UI than
+            // the setting deserves.
+            Widget::text(
+                ids::SHELL_ARGS,
+                "Arguments",
+                config.shell.args.join(" "),
+                "none",
+            ),
+            Widget::text(
+                ids::TERM,
+                "TERM",
+                config.shell.term.clone(),
+                "xterm-256color",
+            ),
             Widget::heading(""),
             // Save is disabled until something changes, so the button itself says
             // whether there is anything to write.
@@ -277,6 +307,33 @@ impl SettingsPanel {
                     Some((shape, _)) => set(&mut config.cursor.shape, *shape),
                     None => false,
                 },
+                _ => false,
+            },
+
+            UiAction::Edited(id, ref text) => match id {
+                ids::SHELL_PROGRAM => {
+                    // Empty means "use $SHELL", which is what `None` encodes — an
+                    // empty string would try to exec a program with no name.
+                    let next = if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text.clone())
+                    };
+                    set(&mut config.shell.program, next)
+                }
+                ids::SHELL_ARGS => {
+                    let next: Vec<String> = text.split_whitespace().map(|s| s.to_owned()).collect();
+                    set(&mut config.shell.args, next)
+                }
+                ids::TERM => {
+                    // A blank TERM makes curses programs refuse to start, so an empty
+                    // field falls back rather than being written through.
+                    if text.trim().is_empty() {
+                        false
+                    } else {
+                        set(&mut config.shell.term, text.clone())
+                    }
+                }
                 _ => false,
             },
 

@@ -137,7 +137,8 @@ pub fn draw_widgets(
         draw_row_background(out, placed, focus, hover, theme, colors);
     }
     for placed in ui.placed() {
-        draw_row_text(out, fonts, placed, theme, colors);
+        let focused = placed.widget.id().is_some() && placed.widget.id() == focus;
+        draw_row_text(out, fonts, placed, focused, theme, colors);
     }
 }
 
@@ -198,6 +199,27 @@ fn draw_row_background(
         ));
     }
 
+    // A text field gets a sunken box so it reads as editable rather than as a value
+    // someone forgot to make a control.
+    if let Widget::Text { .. } = placed.widget {
+        let r = placed.value_rect;
+        out.push(Instance::solid(
+            r.x as f32,
+            r.y as f32,
+            r.width as f32,
+            r.height as f32,
+            colors.convert_opaque(theme.split_divider()),
+        ));
+        let inner = r.inset(BORDER as u32, BORDER as u32);
+        out.push(Instance::solid(
+            inner.x as f32,
+            inner.y as f32,
+            inner.width as f32,
+            inner.height as f32,
+            colors.convert_opaque(theme.background),
+        ));
+    }
+
     // A button gets a visible box so it reads as pressable, which a bare label does
     // not. Disabled buttons get the box too, just dimmed by their text color.
     if let Widget::Button { .. } = placed.widget {
@@ -234,6 +256,7 @@ fn draw_row_text(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
     placed: &Placed,
+    focused: bool,
     theme: &Theme,
     colors: ColorSpace,
 ) {
@@ -280,6 +303,61 @@ fn draw_row_text(
                 colors,
                 Style::Regular,
             );
+        }
+
+        Widget::Text {
+            label,
+            value,
+            caret,
+            placeholder,
+            ..
+        } => {
+            text::draw_in_box(
+                out,
+                fonts,
+                label,
+                placed.rect,
+                PADDING,
+                Align::Left,
+                theme.foreground,
+                colors,
+                Style::Regular,
+            );
+
+            let shown = if value.is_empty() { placeholder } else { value };
+            text::draw_in_box(
+                out,
+                fonts,
+                shown,
+                placed.value_rect,
+                PADDING,
+                Align::Left,
+                if value.is_empty() {
+                    // A placeholder that looks like a value is worse than none.
+                    theme.bright.black
+                } else {
+                    theme.foreground
+                },
+                colors,
+                Style::Regular,
+            );
+
+            // The caret is drawn only when the field has focus: a bar in an
+            // unfocused field suggests typing would go there.
+            if focused {
+                let cell = fonts.metrics().width as f32;
+                let x = placed.value_rect.x as f32 + PADDING + *caret as f32 * cell;
+                // Clamped so a caret past the visible width sits at the edge rather
+                // than drawing outside the field.
+                let limit = placed.value_rect.right() as f32 - PADDING;
+                out.push(Instance::solid(
+                    x.min(limit),
+                    placed.value_rect.y as f32 + 4.0,
+                    2.0,
+                    (placed.value_rect.height as f32 - 8.0).max(1.0),
+                    colors.convert_opaque(theme.cursor()),
+                ));
+            }
         }
 
         _ => {
