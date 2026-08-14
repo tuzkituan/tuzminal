@@ -28,7 +28,7 @@ pub use instance::{
 pub use text::{draw_in_box, measure, Align};
 pub use widget::{
     center_panel, draw_footer_divider, draw_menu, draw_page_frame, draw_panel_frame,
-    draw_panel_title, draw_scrollbar, draw_toasts, draw_widgets, draw_widgets_in, Toast,
+    draw_panel_title, draw_scrollbar, draw_toasts, draw_widgets, draw_widgets_in, MenuRow, Toast,
 };
 
 use tuz_font::atlas::{Atlas, BYTES_PER_PIXEL};

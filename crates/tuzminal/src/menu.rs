@@ -9,7 +9,7 @@
 //! What it does need, and what the tests cover, is the part that is easy to get
 //! wrong: staying on screen when the button it hangs from is near an edge.
 
-use tuz_layout::Rect;
+use tuz_layout::{ChromeButton, Rect};
 
 /// What an open menu is for, so the app knows what picking a row means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +21,21 @@ pub enum MenuKind {
 }
 
 /// One row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MenuItem {
     pub label: String,
     /// What picking it means. The caller decides; the menu only carries it.
     pub value: String,
+    /// The chord that does the same thing, shown dim against the right edge.
+    ///
+    /// A menu is where a keyboard shortcut gets learned: the row you are already looking
+    /// for tells you how to skip the menu next time. `None` for a row with no binding.
+    pub shortcut: Option<String>,
+    /// The toolbar icon for this row, when it stands for a toolbar button.
+    ///
+    /// Carried as the button itself rather than a glyph, so the menu draws the same
+    /// geometry the strip does and the two cannot drift.
+    pub icon: Option<ChromeButton>,
 }
 
 pub struct Menu {
@@ -43,6 +53,11 @@ const ROW_PADDING: u32 = 6;
 pub const PADDING: f32 = 8.0;
 /// Widest a menu gets, in characters, before labels are left to truncate.
 const MAX_COLUMNS: u32 = 40;
+/// Blank columns between a row's label and its keyboard shortcut.
+///
+/// Enough that the chord reads as its own column. Without it, "Settings ctrl+shift+comma"
+/// runs together into one unparseable string.
+const SHORTCUT_GAP: u32 = 4;
 
 impl Menu {
     pub fn new(kind: MenuKind, anchor: Rect, items: Vec<MenuItem>) -> Self {
@@ -85,14 +100,33 @@ impl Menu {
         let (cell_width, cell_height) = cell;
         let row = Self::row_height(cell_height);
 
+        // Measured per row as label plus chord plus the gap between them, and the widest
+        // row wins. Measuring only the label was fine until rows carried a chord, at
+        // which point the menu was sized for half its contents and the chord was cut off
+        // by the renderer's overflow guard.
         let widest = self
             .items
             .iter()
-            .map(|i| i.label.chars().count() as u32)
+            .map(|i| {
+                let label = i.label.chars().count() as u32;
+                match &i.shortcut {
+                    Some(chord) => label + SHORTCUT_GAP + chord.chars().count() as u32,
+                    None => label,
+                }
+            })
             .max()
             .unwrap_or(0)
             .min(MAX_COLUMNS);
-        let width = (widest * cell_width + PADDING as u32 * 4).min(window.width);
+
+        // A square the height of a row, plus its gap, reserved as soon as any row has an
+        // icon — `draw_menu` indents every label once one row does, so the width has to
+        // agree or the last column is clipped.
+        let icons = if self.items.iter().any(|i| i.icon.is_some()) {
+            cell_height + PADDING as u32
+        } else {
+            0
+        };
+        let width = (widest * cell_width + PADDING as u32 * 4 + icons).min(window.width);
         let height = (row * self.items.len() as u32 + PADDING as u32 * 2).min(window.height);
 
         // Below the button, unless there is no room below — then above it, which is
@@ -142,6 +176,7 @@ mod tests {
                 .map(|i| MenuItem {
                     label: format!("item {i}"),
                     value: format!("{i}"),
+                    ..MenuItem::default()
                 })
                 .collect(),
         )
@@ -237,6 +272,7 @@ mod tests {
             vec![MenuItem {
                 label: "bash".to_owned(),
                 value: "/bin/bash".to_owned(),
+                ..MenuItem::default()
             }],
         );
         assert_eq!(shells.kind, MenuKind::NewTabShell);
@@ -259,5 +295,143 @@ mod tests {
         assert_eq!(m.selected(), None);
         // Still has to produce a usable rect rather than dividing by zero.
         let _ = m.rect(WINDOW, CELL);
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    const CELL: (u32, u32) = (8, 18);
+    const WINDOW: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1400,
+        height: 900,
+    };
+
+    fn item(label: &str, shortcut: Option<&str>, icon: Option<ChromeButton>) -> MenuItem {
+        MenuItem {
+            label: label.to_owned(),
+            value: label.to_owned(),
+            shortcut: shortcut.map(str::to_owned),
+            icon,
+        }
+    }
+
+    fn menu_of(items: Vec<MenuItem>) -> Menu {
+        Menu::new(MenuKind::AppMenu, Rect::new(100, 30, 30, 30), items)
+    }
+
+    #[test]
+    fn a_row_with_a_chord_makes_the_menu_wider() {
+        // Sizing on the label alone was fine until rows carried a chord, at which point
+        // the menu was sized for half its contents and the chord was cut off by the
+        // renderer's own overflow guard.
+        let bare = menu_of(vec![item("Settings", None, None)])
+            .rect(WINDOW, CELL)
+            .width;
+        let with = menu_of(vec![item("Settings", Some("ctrl+shift+comma"), None)])
+            .rect(WINDOW, CELL)
+            .width;
+        assert!(with > bare, "{with} is not wider than {bare}");
+    }
+
+    #[test]
+    fn the_chord_and_the_label_both_fit_inside_the_row() {
+        // What the width has to be for: label from the left, chord from the right, and
+        // room to spare between them.
+        let label = "Settings";
+        let chord = "ctrl+shift+comma";
+        let m = menu_of(vec![item(label, Some(chord), None)]);
+        let rect = m.rect(WINDOW, CELL);
+        let row = m.row_rect(rect, 0, CELL.1);
+
+        let needed = (label.chars().count() + chord.chars().count()) as u32 * CELL.0;
+        assert!(
+            row.width > needed,
+            "a {}px row cannot hold {needed}px of text plus a gap",
+            row.width
+        );
+    }
+
+    #[test]
+    fn a_longer_chord_needs_more_room() {
+        // Guards against a constant reservation, which would pass the test above and then
+        // clip anything longer than whatever was assumed.
+        let short = menu_of(vec![item("Shortcuts", Some("f1"), None)])
+            .rect(WINDOW, CELL)
+            .width;
+        let long = menu_of(vec![item("Shortcuts", Some("ctrl+shift+super+f12"), None)])
+            .rect(WINDOW, CELL)
+            .width;
+        assert!(long > short);
+    }
+
+    #[test]
+    fn the_widest_row_decides_the_width() {
+        // Not the first, and not the last. A chord on any row has to fit.
+        let rows = vec![
+            item("A", Some("f1"), None),
+            item("B", Some("ctrl+shift+super+alt+f12"), None),
+            item("C", None, None),
+        ];
+        let wide = menu_of(rows).rect(WINDOW, CELL).width;
+        let narrow = menu_of(vec![item("A", Some("f1"), None)])
+            .rect(WINDOW, CELL)
+            .width;
+        assert!(wide > narrow);
+    }
+
+    #[test]
+    fn an_icon_on_any_row_widens_the_menu_for_all_of_them() {
+        // `draw_menu` indents every label as soon as one row has an icon, so the width
+        // has to account for it or the right-hand column is clipped.
+        let without = menu_of(vec![item("Split right", None, None)])
+            .rect(WINDOW, CELL)
+            .width;
+        let with = menu_of(vec![
+            item("Split right", None, Some(ChromeButton::SplitRight)),
+            item("Settings", None, None),
+        ])
+        .rect(WINDOW, CELL)
+        .width;
+        assert!(with > without, "{with} is not wider than {without}");
+    }
+
+    #[test]
+    fn a_menu_with_chords_still_stays_on_screen() {
+        // The extra width is the point: a menu hanging off a button near the right edge
+        // has further to travel now than it did.
+        let window = Rect::new(0, 0, 420, 300);
+        let m = Menu::new(
+            MenuKind::AppMenu,
+            Rect::new(400, 30, 20, 20),
+            vec![item(
+                "Shortcuts",
+                Some("ctrl+shift+super+f12"),
+                Some(ChromeButton::Help),
+            )],
+        );
+        let rect = m.rect(window, CELL);
+        assert!(rect.x >= window.x, "ran off the left edge to {}", rect.x);
+        assert!(
+            rect.right() <= window.right(),
+            "ran off the right edge to {}",
+            rect.right()
+        );
+    }
+
+    #[test]
+    fn rows_without_chords_are_unchanged_by_the_feature() {
+        // The shell menu has neither chords nor icons and must size exactly as before.
+        let a = menu_of(vec![item("bash", None, None), item("fish", None, None)])
+            .rect(WINDOW, CELL);
+        let b = menu_of(vec![item("bash", None, None), item("fish", None, None)])
+            .rect(WINDOW, CELL);
+        assert_eq!(a, b);
+        // Four characters plus the four paddings, and nothing reserved for a column that
+        // no row uses.
+        assert_eq!(a.width, 4 * CELL.0 + PADDING as u32 * 4);
     }
 }

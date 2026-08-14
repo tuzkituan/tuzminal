@@ -1574,11 +1574,16 @@ impl App {
         if let Some(menu) = self.menu.as_ref() {
             let window = Rect::from_size(gpu.size().0, gpu.size().1);
             let rect = menu.rect(window, (cell.width, cell.height));
-            let rows: Vec<(Rect, &str)> = menu
+            let rows: Vec<tuz_render::MenuRow<'_>> = menu
                 .items
                 .iter()
                 .enumerate()
-                .map(|(i, item)| (menu.row_rect(rect, i, cell.height), item.label.as_str()))
+                .map(|(i, item)| tuz_render::MenuRow {
+                    rect: menu.row_rect(rect, i, cell.height),
+                    label: item.label.as_str(),
+                    shortcut: item.shortcut.as_deref(),
+                    icon: item.icon,
+                })
                 .collect();
             tuz_render::draw_menu(instances, fonts, rect, &rows, menu.selected, theme, colors);
             menu_rect = Some(rect);
@@ -2273,6 +2278,9 @@ impl App {
         let items: Vec<crate::menu::MenuItem> = crate::shells::available()
             .into_iter()
             .map(|shell| crate::menu::MenuItem {
+                // A shell is not bound to anything and has no icon of its own.
+                shortcut: None,
+                icon: None,
                 label: shell.name.clone(),
                 value: shell.path.display().to_string(),
             })
@@ -2386,19 +2394,29 @@ impl App {
             .map(|button| crate::menu::MenuItem {
                 label: button.describe().to_owned(),
                 value: format!("{BUTTON_PREFIX}{}", button.describe()),
+                // The chord the button's own tooltip would show, from the same lookup, so
+                // the strip and the menu never disagree about it.
+                shortcut: self.button_shortcut(*button),
+                // The icon is what the user was hunting for on the strip, so it is what
+                // makes the row recognisable as the button that went missing.
+                icon: Some(*button),
             })
             .collect();
 
         items.extend(
             [
-                ("Settings", "settings"),
-                ("Shortcuts", "help"),
-                ("Plugins", "plugins"),
+                ("Settings", "settings", ChromeButton::Settings),
+                ("Shortcuts", "help", ChromeButton::Help),
+                ("Plugins", "plugins", ChromeButton::Plugins),
             ]
             .into_iter()
-            .map(|(label, value)| crate::menu::MenuItem {
+            .map(|(label, value, button)| crate::menu::MenuItem {
                 label: label.to_owned(),
                 value: value.to_owned(),
+                // These three have no button on the strip any more, but they still have
+                // an icon and a chord, and the menu is now the only place either is shown.
+                shortcut: self.button_shortcut(button),
+                icon: Some(button),
             }),
         );
 

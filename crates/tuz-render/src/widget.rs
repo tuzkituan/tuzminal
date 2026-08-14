@@ -11,7 +11,7 @@ use crate::instance::{ColorSpace, Instance};
 use crate::text::{self, Align};
 use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
-use tuz_layout::Rect;
+use tuz_layout::{ChromeButton, Rect};
 use tuz_ui::{EntryKind, Placed, Ui, Widget, WidgetId};
 
 /// Inset for text inside a row.
@@ -100,17 +100,34 @@ pub fn draw_page_frame(
     ));
 }
 
+/// One dropdown row: where it goes, what it says, its chord, and its toolbar icon.
+///
+/// The chord and the icon are optional because not every menu has them — a list of
+/// shells to open a tab with has neither.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuRow<'a> {
+    pub rect: Rect,
+    pub label: &'a str,
+    /// The keybinding, drawn dim against the right edge. `None` leaves the column empty.
+    pub shortcut: Option<&'a str>,
+    /// The same icon the toolbar button carries, drawn to the left of the label.
+    ///
+    /// Matters most for a row that is in the menu *because* its button did not fit: the
+    /// icon is what the user was looking for on the strip, so it is what makes the row
+    /// recognisable as the thing they lost.
+    pub icon: Option<ChromeButton>,
+}
+
 /// Draw a dropdown: a bordered box, its rows, and the selected one highlighted.
 ///
 /// Its own function rather than a `Ui`: a menu is one column of labels that closes as
 /// soon as you pick something, and routing it through the general widget layout would
 /// bring scrolling, focus rings and a footer for a list of four shells.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_menu(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
     rect: Rect,
-    rows: &[(Rect, &str)],
+    rows: &[MenuRow<'_>],
     selected: usize,
     theme: &Theme,
     colors: ColorSpace,
@@ -132,31 +149,95 @@ pub fn draw_menu(
         colors.convert_opaque(theme.background_focused()),
     ));
 
-    for (index, (row, label)) in rows.iter().enumerate() {
-        if index == selected {
+    let cell = fonts.metrics();
+    let icon_column = rows.iter().any(|r| r.icon.is_some());
+
+    for (index, row) in rows.iter().enumerate() {
+        let highlighted = index == selected;
+        let row_background = if highlighted {
+            theme.cursor()
+        } else {
+            theme.background_focused()
+        };
+        if highlighted {
             out.push(Instance::solid(
-                row.x as f32,
-                row.y as f32,
-                row.width as f32,
-                row.height as f32,
-                colors.convert_opaque(theme.cursor()),
+                row.rect.x as f32,
+                row.rect.y as f32,
+                row.rect.width as f32,
+                row.rect.height as f32,
+                colors.convert_opaque(row_background),
             ));
         }
+
+        let foreground = if highlighted {
+            theme.background
+        } else {
+            theme.foreground
+        };
+
+        // The icon sits in a square the height of the row, and the label starts after it.
+        // Reserved for every row as soon as any row has one, so the labels line up
+        // instead of stepping in and out.
+        let mut text_rect = row.rect;
+        if icon_column {
+            let side = cell.height;
+            let icon_rect = Rect::new(
+                row.rect.x + PADDING as i32,
+                row.rect.y + ((row.rect.height.saturating_sub(side)) / 2) as i32,
+                side,
+                side,
+            );
+            if let Some(button) = row.icon {
+                crate::icon::draw(
+                    out,
+                    button,
+                    icon_rect,
+                    colors.convert(foreground),
+                    colors.convert(row_background),
+                );
+            }
+            let used = side + PADDING as u32;
+            text_rect = Rect::new(
+                row.rect.x + used as i32,
+                row.rect.y,
+                row.rect.width.saturating_sub(used),
+                row.rect.height,
+            );
+        }
+
         text::draw_in_box(
             out,
             fonts,
-            label,
-            *row,
+            row.label,
+            text_rect,
             PADDING,
             Align::Left,
-            if index == selected {
-                theme.background
-            } else {
-                theme.foreground
-            },
+            foreground,
             colors,
             Style::Regular,
         );
+
+        if let Some(shortcut) = row.shortcut {
+            // Dim, and against the right edge, so it reads as an annotation on the row
+            // rather than as part of its name. `normal.white` is the dim slot that is
+            // legible on this background — `bright.black` is the chrome's own grey and
+            // text in it disappears, which this file has got wrong before.
+            text::draw_in_box(
+                out,
+                fonts,
+                shortcut,
+                text_rect,
+                PADDING,
+                Align::Right,
+                if highlighted {
+                    theme.background
+                } else {
+                    theme.normal.white
+                },
+                colors,
+                Style::Regular,
+            );
+        }
     }
 }
 
