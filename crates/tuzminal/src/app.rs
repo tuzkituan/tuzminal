@@ -118,6 +118,13 @@ const BUTTON_PREFIX: &str = "button:";
 /// How many frames `--resize-bench` averages over.
 const BENCH_FRAMES: u64 = 200;
 
+/// Longest inline hint kept per pane, in characters.
+///
+/// `tuz_core::draw_inline_hint` already truncates at the row's last column, so this is
+/// not about what is drawn — it is about not storing an unbounded string per pane
+/// because a plugin published one.
+const MAX_INLINE_HINT: usize = 1024;
+
 /// Accumulated timings for `--resize-bench`.
 #[derive(Debug)]
 pub struct ResizeBench {
@@ -335,6 +342,18 @@ pub struct App {
     /// tab can show an activity dot.
     activity: std::collections::HashSet<PaneId>,
 
+    /// Ghost text a plugin published, per pane. Appended to the snapshot after it is
+    /// taken, for the focused pane only, and dropped as soon as its line changes.
+    inline_hint: HashMap<PaneId, String>,
+    /// The last input line handed to plugins, so an unchanged frame dispatches
+    /// nothing.
+    ///
+    /// One slot rather than a map: only the focused pane is ever polled, so a map
+    /// would accumulate entries for panes never polled again and need its own
+    /// cleanup, while a single slot invalidates itself when focus moves — the
+    /// `PaneId` no longer matches.
+    last_input_line: Option<(PaneId, String, u16)>,
+
     clipboard: Option<arboard::Clipboard>,
     /// Loaded plugins. Runs inline on this thread under a per-callback budget; see
     /// `tuz_plugin::PluginRuntime` for why it is not on its own thread.
@@ -470,6 +489,8 @@ impl App {
             last_input: Instant::now(),
             titles: HashMap::new(),
             activity: std::collections::HashSet::new(),
+            inline_hint: HashMap::new(),
+            last_input_line: None,
             clipboard,
             plugins,
             exit_requested: false,
@@ -937,6 +958,16 @@ impl App {
         // built. Skipped entirely when nothing is loaded, so the common case pays
         // nothing.
         if !self.plugins.is_empty() {
+            // Before the status dispatch, and before `self.frame` is cloned below.
+            //
+            // Here rather than in the PTY drain because every path that can change the
+            // input line — an echoed keystroke, a paste, another plugin's `send_text`,
+            // focus moving to a different pane — ends in a redraw, so one call site
+            // covers all of them. And the hint has to be settled *before* the pane loop
+            // injects it, or a suggestion is drawn one keystroke behind what is typed.
+            if self.plugins.wants("input_line") {
+                self.poll_input_line();
+            }
             let had_status = !self.plugins.status_segments().is_empty();
             let commands = self.plugins.dispatch(&PluginEvent::StatusBarRender);
             self.apply_plugin_commands(commands);
@@ -1130,6 +1161,7 @@ impl App {
             settings,
             sessions,
             instances,
+            inline_hint,
             ..
         } = self;
         let gpu = gpu.as_mut().expect("checked above");
@@ -1142,6 +1174,9 @@ impl App {
             srgb,
             opacity: cfg.window.opacity,
         };
+        // Resolved once per frame rather than once per pane: it is a theme lookup, and
+        // the theme cannot change inside a frame.
+        let hint_color = tuz_core::inline_hint_color(theme);
 
         // Build instances for every visible pane, remembering each pane's range so
         // it can be drawn under its own scissor rect.
@@ -1177,14 +1212,34 @@ impl App {
             };
             let focused = geom.pane == active;
 
-            let snapshot = {
+            let (mut snapshot, alt_screen, anchor) = {
                 // Hold the terminal lock only for the copy, never across
                 // rasterization or GPU work.
                 let term = session.term().lock();
+                // Both read under the same lock: a second acquisition for one bit and
+                // one point is a second chance to contend with the PTY thread.
+                let alt_screen = term.mode().contains(tuz_core::TermMode::ALT_SCREEN);
+                // Deliberately *not* `snapshot.cursor`, which is `None` on the dark half
+                // of a blink — a hint keyed off that blinks along with the cursor.
+                let anchor = tuz_core::cursor_anchor(&term);
                 // An unfocused pane shows a steady cursor: blinking every split at
                 // once is visually noisy and hides which one has focus.
-                tuz_core::snapshot(&term, theme, cfg, focused, blink_on || !focused)
+                (
+                    tuz_core::snapshot(&term, theme, cfg, focused, blink_on || !focused),
+                    alt_screen,
+                    anchor,
+                )
             };
+
+            // Ghost text, appended after the snapshot rather than inside it, so the
+            // snapshot stays a faithful copy of the grid. Focused pane only — a
+            // suggestion on a pane you cannot type into is a lie — and never over a
+            // full-screen program, which owns the whole row and its own cursor.
+            if focused && !alt_screen {
+                if let (Some(hint), Some(anchor)) = (inline_hint.get(&geom.pane), anchor) {
+                    tuz_core::draw_inline_hint(&mut snapshot, anchor, hint, hint_color);
+                }
+            }
 
             let start = instances.len() as u32;
             build_pane(
@@ -1970,6 +2025,49 @@ impl App {
         true
     }
 
+    /// Hand the focused pane's input line to plugins, if it moved since last frame.
+    ///
+    /// The terminal mutex is taken for one row read and released before any plugin
+    /// runs. That ordering is not cosmetic: a Lua callback is allowed 250 ms, and
+    /// holding a `FairMutex` across it would stall the PTY thread for a quarter of a
+    /// second — see the module docs of `tuz_core::session`.
+    fn poll_input_line(&mut self) {
+        let pane = self.layout.active_pane();
+        let current = self
+            .sessions
+            .get(&pane)
+            .and_then(|s| tuz_core::input_line(&s.term().lock()));
+
+        let Some(current) = current else {
+            // A full-screen program, a scrolled-back view, a wrapped command, or a row
+            // holding hidden characters. No line means no hint, and the guard is reset
+            // so the line is re-sent in full as soon as a prompt comes back.
+            self.inline_hint.remove(&pane);
+            self.last_input_line = None;
+            return;
+        };
+
+        let unchanged = self.last_input_line.as_ref().is_some_and(|(p, line, col)| {
+            *p == pane && *col == current.cursor_col && *line == current.line
+        });
+        if unchanged {
+            return;
+        }
+        self.last_input_line = Some((pane, current.line.clone(), current.cursor_col));
+
+        // Dropped *before* the dispatch, not after. If the plugin returns no hint — no
+        // match, a timed-out callback, a plugin just disabled — the old ghost must
+        // vanish rather than sit over a line it was not computed for.
+        self.inline_hint.remove(&pane);
+
+        self.notify_plugins(PluginEvent::InputLine {
+            pane: tuz_plugin_api::PaneId(pane.0),
+            line: current.line,
+            cursor_col: current.cursor_col,
+            at_line_end: current.at_line_end,
+        });
+    }
+
     /// Notify plugins of an event and apply whatever they ask for.
     fn notify_plugins(&mut self, event: PluginEvent) {
         if self.plugins.is_empty() {
@@ -2062,6 +2160,28 @@ impl App {
                             );
                         }
                     }
+                }
+                PluginCommand::SetInlineHint { pane, text } => {
+                    let target = pane
+                        .map(|p| PaneId(p.0))
+                        .unwrap_or_else(|| self.layout.active_pane());
+                    // Re-checked like every other command: a plugin naming a pane that
+                    // has closed must not leave behind an entry nothing draws and
+                    // nothing cleans up.
+                    if self.sessions.contains_key(&target) {
+                        // Capped here so the frame path stays a short loop over chars.
+                        // `draw_inline_hint` truncates at the row anyway; this is about
+                        // not storing a megabyte per pane because a plugin had a bug.
+                        let text: String = text.chars().take(MAX_INLINE_HINT).collect();
+                        if text.is_empty() {
+                            self.inline_hint.remove(&target);
+                        } else {
+                            self.inline_hint.insert(target, text);
+                        }
+                    }
+                    // No `request_redraw` here: the only path that sets a hint is a
+                    // dispatch inside a frame that has not drawn yet, so asking for
+                    // another would make every keystroke cost two frames.
                 }
                 PluginCommand::ReloadConfig => self.reload_config(),
                 PluginCommand::Quit => self.exit_requested = true,
@@ -3110,6 +3230,16 @@ impl App {
     fn drop_session(&mut self, pane: PaneId) {
         if let Some(mut session) = self.sessions.remove(&pane) {
             session.shutdown();
+            // Before the notification, so a plugin reacting to the close cannot publish
+            // a hint for a pane that is already gone.
+            self.inline_hint.remove(&pane);
+            if self
+                .last_input_line
+                .as_ref()
+                .is_some_and(|(p, ..)| *p == pane)
+            {
+                self.last_input_line = None;
+            }
             self.notify_plugins(PluginEvent::PaneClosed {
                 pane: tuz_plugin_api::PaneId(pane.0),
             });

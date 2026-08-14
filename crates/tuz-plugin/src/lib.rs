@@ -127,6 +127,20 @@ impl Host {
         self.plugins.is_empty()
     }
 
+    /// Whether any enabled plugin asked for an event by name.
+    ///
+    /// Lets the app skip *producing* an expensive event rather than producing it and
+    /// having [`Host::dispatch`] drop it. Building an `input_line` event means taking
+    /// the terminal mutex and copying a row, which is not worth doing for nobody.
+    ///
+    /// Disabled plugins do not count: one that failed its way out of the session must
+    /// not keep the cost of its events alive.
+    pub fn wants(&self, event: &str) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| !p.disabled && p.manifest.wants_event(event))
+    }
+
     /// Every command name any plugin registered, for keymap resolution.
     pub fn command_names(&self) -> Vec<String> {
         self.plugins
@@ -527,6 +541,7 @@ pub fn event_name(event: &Event) -> &'static str {
         Event::StatusBarRender => "status_bar_render",
         Event::StatusSegmentClick { .. } => "status_segment_click",
         Event::Command { .. } => "command",
+        Event::InputLine { .. } => "input_line",
         // `Event` is non_exhaustive; an unnamed event is simply not deliverable
         // by name rather than a compile error in downstream builds.
         _ => "unknown",
@@ -779,6 +794,70 @@ mod tests {
             text: "hello".to_owned(),
         });
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    fn input_line() -> Event {
+        Event::InputLine {
+            pane: PaneId(1),
+            line: "$ sudo -S hunter2".to_owned(),
+            cursor_col: 17,
+            at_line_end: true,
+        }
+    }
+
+    #[test]
+    fn the_input_line_is_withheld_without_the_permission() {
+        // Same privacy-sensitive path as `pane_output`: asking for the event is not
+        // enough, because this is what the user is typing.
+        let mut m = manifest("suggester", &["input_line"]);
+        m.permissions.clear();
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut s = stub(vec![]);
+        s.calls = calls.clone();
+
+        let mut host = host_with(vec![(m, s)]);
+        host.dispatch(&input_line());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the typed line must not reach a plugin without read-input"
+        );
+    }
+
+    #[test]
+    fn the_input_line_is_delivered_once_the_permission_is_granted() {
+        let mut m = manifest("suggester", &["input_line"]);
+        m.permissions.push(tuz_plugin_api::Permission::ReadInput);
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut s = stub(vec![]);
+        s.calls = calls.clone();
+
+        let mut host = host_with(vec![(m, s)]);
+        host.dispatch(&input_line());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn wants_reports_whether_any_enabled_plugin_asked_for_an_event() {
+        // The app calls this to decide whether to take the terminal mutex at all, so
+        // a wrong answer is either a missing feature or a lock taken for nobody.
+        let mut granted = manifest("suggester", &["input_line"]);
+        granted
+            .permissions
+            .push(tuz_plugin_api::Permission::ReadInput);
+        let mut host = host_with(vec![(granted, stub(vec![]))]);
+        assert!(host.wants("input_line"));
+
+        // A plugin that failed its way out of the session must not keep the cost of
+        // its events alive.
+        host.plugins[0].disabled = true;
+        assert!(!host.wants("input_line"));
+
+        // The event alone is not enough, matching `wants_event`.
+        let host = host_with(vec![(manifest("half", &["input_line"]), stub(vec![]))]);
+        assert!(!host.wants("input_line"));
     }
 
     #[test]

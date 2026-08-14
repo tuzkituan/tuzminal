@@ -1,0 +1,38 @@
+# Inline suggestions from shell history, the way fish and zsh-autosuggestions do it.
+#
+# This is the plugin that added `input_line` and `set_inline_hint`, the same way
+# `open-in-ide` is the one that added clickable status segments. Both additions were
+# made because the feature could not be expressed otherwise — a plugin could not see
+# what was being typed, and could not draw.
+
+name = "suggest"
+version = "0.1.0"
+api_version = 1
+runtime = "lua"
+entry = "init.lua"
+
+description = "Ghost-text suggestions from your shell history, accepted with right or end."
+author = "tuzminal"
+
+# `read-input` is what makes `input_line` deliverable. It is deliberately narrower
+# than `read-output` — one row, left of the cursor, focused pane only, never on the
+# alternate screen — and the install prompt says so in those terms rather than
+# borrowing `read-output`'s "including passwords you type".
+#
+# `fs-read` is the history file. Three literal paths rather than one wide one, so the
+# prompt names the files instead of naming a home directory. It is a statement of
+# intent and not a boundary: one `fs-read` restores the whole `io` table (see
+# `restrict_environment`), and the path itself is never checked.
+permissions = [
+  "read-input",
+  { fs-read = "~/.zsh_history" },
+  { fs-read = "~/.bash_history" },
+  { fs-read = "~/.local/share/fish/fish_history" },
+]
+
+# Every event this plugin needs, not just the gated one. A non-empty `events` list is
+# *exclusive* — `Manifest::wants_event` returns `events.is_empty() || contains(name)`
+# — so listing `input_line` alone would silently stop `key` arriving and none of the
+# accept chords would ever fire. That failure is a no-op, not an error, which is
+# exactly why it is worth a comment.
+events = ["startup", "input_line", "key", "pane_closed", "tab_switch", "command"]

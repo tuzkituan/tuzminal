@@ -159,6 +159,21 @@ pub fn from_rgb(rgb: Rgb) -> Rgba {
     Rgba::rgb(rgb.r, rgb.g, rgb.b)
 }
 
+/// Color for inline ghost text — a suggestion the user has not accepted yet.
+///
+/// Derived from the theme rather than taken from a palette slot, because the
+/// direction has to reverse between a dark theme and a light one and only the
+/// theme's own foreground and background know which way that is. It is the same
+/// blend-toward-the-background rule as the DIM flag above, pushed slightly further:
+/// ghost text should read as secondary even next to genuinely dim output.
+///
+/// Deliberately not `bright.black`. Several themes put that within a few units of
+/// their background, which would make a suggestion invisible in exactly the themes
+/// people use.
+pub fn inline_hint_color(theme: &Theme) -> Rgba {
+    mix(theme.foreground, theme.background, 0.45)
+}
+
 /// Linear interpolation in sRGB space.
 ///
 /// Not colorimetrically correct, but it is what every other terminal does for

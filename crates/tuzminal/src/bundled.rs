@@ -43,6 +43,19 @@ const BUNDLED: &[(&str, Files)] = &[
             ),
         ],
     ),
+    (
+        "suggest",
+        &[
+            (
+                "plugin.toml",
+                include_str!("../../../plugins/suggest/plugin.toml"),
+            ),
+            (
+                "init.lua",
+                include_str!("../../../plugins/suggest/init.lua"),
+            ),
+        ],
+    ),
 ];
 
 /// Write any bundled plugin that is not already installed.

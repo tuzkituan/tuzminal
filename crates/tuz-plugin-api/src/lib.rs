@@ -153,6 +153,39 @@ pub enum Event {
         name: String,
         args: Vec<String>,
     },
+
+    /// The focused pane's input line changed: the cursor row's text, up to the
+    /// cursor.
+    ///
+    /// **Opt-in twice** — an `input_line` entry in `events` *and* the `read-input`
+    /// permission — because this is what the user is typing.
+    ///
+    /// Delivered only for the focused pane, only when it actually moved, and never
+    /// while a full-screen program holds the alternate screen, so what is typed into
+    /// `vim` or a TUI is not reported. It is not filtered beyond that: a secret
+    /// typed as a command-line argument is echoed by the shell, so it is in here.
+    ///
+    /// `line` starts at column 0, which means it **includes the shell's prompt**. No
+    /// escape sequence marks where a prompt ends, so the host does not pretend to
+    /// know; a plugin matching against history has to work that out for itself.
+    InputLine {
+        pane: PaneId,
+        /// Row text left of the cursor. Wide-glyph spacers are dropped, so one
+        /// glyph is one `char`.
+        line: String,
+        /// The cursor's column — *not* `line.chars().count()`, because a
+        /// double-width glyph is one `char` and two columns.
+        cursor_col: u16,
+        /// Whether the rest of the row is empty, i.e. the cursor is at the end of
+        /// what is written rather than somewhere inside it.
+        ///
+        /// Reported rather than left to be inferred, because a plugin cannot work it
+        /// out: `line` stops at the cursor, and counting columns against `char`s
+        /// breaks on wide glyphs. It is the condition for appending anything to the
+        /// line — a suggestion offered mid-command would corrupt it — so guessing
+        /// would be guessing about whether it is safe to type.
+        at_line_end: bool,
+    },
 }
 
 /// A plugin's answer to [`Event::Key`].
@@ -258,6 +291,23 @@ pub enum Command {
     ReloadConfig,
 
     Quit,
+
+    /// Show dim "ghost" text at a pane's cursor. Empty `text` clears it.
+    ///
+    /// The one thing a plugin can draw, and deliberately the narrowest exception
+    /// that makes history autosuggestion possible: the plugin supplies a string and
+    /// nothing else. The host chooses the position (the cursor) and the colour (the
+    /// theme's), refuses the hint whenever it would cover something the program
+    /// printed, refuses it on the alternate screen and on an unfocused pane,
+    /// truncates it at the last column, and drops it as soon as the line changes.
+    ///
+    /// `None` targets the focused pane. A hint on an unfocused pane is stored and
+    /// never drawn — a suggestion on a pane you cannot type into would be a lie — so
+    /// the field exists to keep the two runtimes' reach equal rather than for use.
+    SetInlineHint {
+        pane: Option<PaneId>,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -292,6 +342,8 @@ pub enum Runtime {
 pub enum Permission {
     /// Receive [`Event::PaneOutput`]. Grants sight of everything the user does.
     ReadOutput,
+    /// Receive [`Event::InputLine`]. Grants sight of what is typed at the prompt.
+    ReadInput,
     /// Spawn external processes.
     SpawnProcess,
     /// Make network requests.
@@ -320,6 +372,13 @@ impl Permission {
         match self {
             Permission::ReadOutput => {
                 "see all terminal output, including passwords you type".to_owned()
+            }
+            // Deliberately not the same sentence as `ReadOutput`: this is one row
+            // left of the cursor, not the whole session. Overstating a grant is how
+            // users learn to click through permission prompts without reading them.
+            Permission::ReadInput => {
+                "see the command line you are typing, including secrets passed as arguments"
+                    .to_owned()
             }
             Permission::SpawnProcess => "run other programs".to_owned(),
             Permission::Network => "make network requests".to_owned(),
@@ -416,13 +475,21 @@ impl Manifest {
 
     /// Whether the plugin asked for an event by name.
     ///
-    /// An empty `events` list means the cheap defaults. `pane_output` is never a
-    /// default: delivering every byte of output has a real cost and real privacy
-    /// weight, so it must be requested.
+    /// An empty `events` list means the cheap defaults. Some events are never a
+    /// default: they cost something to deliver and they show a plugin what the user
+    /// is doing, so both the intent (`events`) and the grant (`permissions`) have to
+    /// be explicit.
+    ///
+    /// A table rather than an `if` chain, so a third gated event is one line instead
+    /// of a second special case.
     pub fn wants_event(&self, name: &str) -> bool {
-        if name == "pane_output" {
-            return self.events.iter().any(|e| e == name)
-                && self.permissions.contains(&Permission::ReadOutput);
+        let gated = match name {
+            "pane_output" => Some(Permission::ReadOutput),
+            "input_line" => Some(Permission::ReadInput),
+            _ => None,
+        };
+        if let Some(required) = gated {
+            return self.events.iter().any(|e| e == name) && self.permissions.contains(&required);
         }
         self.events.is_empty() || self.events.iter().any(|e| e == name)
     }
@@ -562,12 +629,64 @@ entry = "init.lua"
     }
 
     #[test]
+    fn input_line_requires_both_the_event_and_the_permission() {
+        // Same double opt-in as `pane_output`, and for the same reason: the event is
+        // what the user is typing, so neither the intent nor the grant alone is
+        // enough.
+        let neither = Manifest::parse(&manifest_toml("")).unwrap();
+        assert!(!neither.wants_event("input_line"));
+
+        let event_only = Manifest::parse(&manifest_toml(r#"events = ["input_line"]"#)).unwrap();
+        assert!(!event_only.wants_event("input_line"));
+
+        let permission_only =
+            Manifest::parse(&manifest_toml(r#"permissions = ["read-input"]"#)).unwrap();
+        assert!(!permission_only.wants_event("input_line"));
+
+        let both = Manifest::parse(&manifest_toml(
+            "events = [\"input_line\"]\npermissions = [\"read-input\"]",
+        ))
+        .unwrap();
+        assert!(both.wants_event("input_line"));
+    }
+
+    #[test]
+    fn read_output_does_not_grant_the_input_line_and_the_reverse() {
+        // The two permissions are deliberately separate so either can be granted
+        // without the other; a plugin wanting suggestions must not have to ask for
+        // sight of the whole session.
+        let output = Manifest::parse(&manifest_toml(
+            "events = [\"input_line\"]\npermissions = [\"read-output\"]",
+        ))
+        .unwrap();
+        assert!(!output.wants_event("input_line"));
+
+        let input = Manifest::parse(&manifest_toml(
+            "events = [\"pane_output\"]\npermissions = [\"read-input\"]",
+        ))
+        .unwrap();
+        assert!(!input.wants_event("pane_output"));
+    }
+
+    #[test]
+    fn read_input_and_read_output_do_not_describe_the_same_thing() {
+        // These strings are what the installer shows. `read-input` is one row left of
+        // the cursor, not the session; describing it with `read-output`'s sentence
+        // would overstate the grant, and prompts that overstate get clicked through.
+        let input = Permission::ReadInput.describe();
+        let output = Permission::ReadOutput.describe();
+        assert_ne!(input, output);
+        assert!(input.contains("typing"), "got: {input}");
+    }
+
+    #[test]
     fn an_empty_event_list_means_the_cheap_defaults() {
         let m = Manifest::parse(&manifest_toml("")).unwrap();
         assert!(m.wants_event("startup"));
         assert!(m.wants_event("bell"));
-        // But never the expensive one.
+        // But never the expensive ones.
         assert!(!m.wants_event("pane_output"));
+        assert!(!m.wants_event("input_line"));
     }
 
     #[test]
@@ -625,6 +744,12 @@ entry = "init.lua"
                 code: 777,
                 payload: "x".to_owned(),
             },
+            Event::InputLine {
+                pane: PaneId(2),
+                line: "$ git st".to_owned(),
+                cursor_col: 8,
+                at_line_end: true,
+            },
         ];
         for event in events {
             let encoded = toml::to_string(&event).expect("event should serialize");
@@ -648,6 +773,16 @@ entry = "init.lua"
                     foreground: Some("#ff0000".to_owned()),
                     background: None,
                 }],
+            },
+            Command::SetInlineHint {
+                pane: None,
+                text: "atus".to_owned(),
+            },
+            // The empty-text form is how a plugin says "no suggestion", so it has to
+            // survive the round trip too rather than being dropped as a default.
+            Command::SetInlineHint {
+                pane: Some(PaneId(2)),
+                text: String::new(),
             },
         ];
         for command in commands {

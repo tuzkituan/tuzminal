@@ -242,6 +242,26 @@ impl LuaPlugin {
             })
         });
 
+        push_command!("set_inline_hint", |args: Variadic<Value>| {
+            // An empty string clears it, so a plugin needs no second function to say
+            // "no suggestion right now".
+            let text = string_arg(args.first(), "set_inline_hint")?;
+            Ok(Command::SetInlineHint { pane: None, text })
+        });
+
+        push_command!("set_inline_hint_to", |args: Variadic<Value>| {
+            // Named apart from the one-argument form, like `send_text` /
+            // `send_text_to`. Without it `SetInlineHint { pane: Some(_) }` would be
+            // unreachable from Lua and the two runtimes would stop having the same
+            // reach — which `lua_can_emit_every_command_wasm_can` exists to prevent.
+            let pane = pane_arg(args.first(), "set_inline_hint_to")?;
+            let text = string_arg(args.get(1), "set_inline_hint_to")?;
+            Ok(Command::SetInlineHint {
+                pane: Some(pane),
+                text,
+            })
+        });
+
         // Status segments take a list of tables, so it does not fit the macro.
         {
             let sink = sink.clone();
@@ -369,6 +389,18 @@ impl PluginRuntime for LuaPlugin {
                 let _ = t.set("name", name.clone());
                 let _ = t.set("args", args.clone());
                 ("on_command", Some(t))
+            }
+            Event::InputLine {
+                pane,
+                line,
+                cursor_col,
+                at_line_end,
+            } => {
+                let t = self.pane_table(*pane)?;
+                let _ = t.set("line", line.clone());
+                let _ = t.set("cursor_col", *cursor_col);
+                let _ = t.set("at_line_end", *at_line_end);
+                ("on_input_line", Some(t))
             }
             // `on_key` goes through `on_key`, not here.
             Event::Key(_) => return Ok(Vec::new()),
@@ -1023,6 +1055,7 @@ return {
               ctx.send_text_to(5, "hi")
               ctx.resize("right", 0.25)
               ctx.set_config("[font]\nsize = 20.0\n")
+              ctx.set_inline_hint_to(6, "atus")
             end
             return M
         "#;
@@ -1047,6 +1080,72 @@ return {
         assert!(commands
             .iter()
             .any(|c| matches!(c, Command::SetConfigOverlay { .. })));
+        assert!(commands.contains(&Command::SetInlineHint {
+            pane: Some(PaneId(6)),
+            text: "atus".to_owned()
+        }));
+    }
+
+    #[test]
+    fn on_input_line_receives_the_line_the_column_and_whether_it_is_at_the_end() {
+        // The payload a suggestion plugin works from. `at_line_end` is reported rather
+        // than inferred, so assert it actually arrives.
+        let source = r#"
+            local M = {}
+            function M.on_input_line(ctx, e)
+              ctx.set_inline_hint(e.line .. ":" .. tostring(e.cursor_col)
+                .. ":" .. tostring(e.at_line_end) .. ":" .. tostring(e.pane))
+            end
+            return M
+        "#;
+        let mut p = plugin(source).expect("should load");
+        let commands = p
+            .dispatch(&Event::InputLine {
+                pane: PaneId(2),
+                line: "$ git st".to_owned(),
+                cursor_col: 8,
+                at_line_end: true,
+            })
+            .expect("should run");
+
+        assert_eq!(
+            commands,
+            vec![Command::SetInlineHint {
+                pane: None,
+                text: "$ git st:8:true:2".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_empty_hint_is_how_a_plugin_says_there_is_no_suggestion() {
+        let mut p = plugin("return { on_startup = function(ctx) ctx.set_inline_hint(\"\") end }\n")
+            .unwrap();
+        let commands = p.dispatch(&Event::Startup).expect("should run");
+
+        assert_eq!(
+            commands,
+            vec![Command::SetInlineHint {
+                pane: None,
+                text: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_plugin_without_on_input_line_is_not_an_error() {
+        // Every handler is optional; an input line delivered to a plugin that does not
+        // want it must be a no-op rather than a failure counted toward the limit.
+        let mut p = plugin("return { on_startup = function(ctx) end }\n").unwrap();
+        let commands = p
+            .dispatch(&Event::InputLine {
+                pane: PaneId(1),
+                line: "x".to_owned(),
+                cursor_col: 1,
+                at_line_end: true,
+            })
+            .expect("a missing handler should not error");
+        assert!(commands.is_empty());
     }
 
     #[test]

@@ -425,10 +425,10 @@ mod shortcut_tests {
     #[test]
     fn rows_without_chords_are_unchanged_by_the_feature() {
         // The shell menu has neither chords nor icons and must size exactly as before.
-        let a = menu_of(vec![item("bash", None, None), item("fish", None, None)])
-            .rect(WINDOW, CELL);
-        let b = menu_of(vec![item("bash", None, None), item("fish", None, None)])
-            .rect(WINDOW, CELL);
+        let a =
+            menu_of(vec![item("bash", None, None), item("fish", None, None)]).rect(WINDOW, CELL);
+        let b =
+            menu_of(vec![item("bash", None, None), item("fish", None, None)]).rect(WINDOW, CELL);
         assert_eq!(a, b);
         // Four characters plus the four paddings, and nothing reserved for a column that
         // no row uses.

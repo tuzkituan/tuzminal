@@ -12,7 +12,7 @@
 use crate::color::{self, CellColors};
 use crate::session::EventProxy;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
@@ -206,6 +206,200 @@ pub fn snapshot(
     }
 }
 
+/// The text a shell prompt is showing, left of the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputLine {
+    /// Cursor row from column 0 up to the cursor. Wide-glyph spacers are dropped,
+    /// so one glyph is one `char`.
+    pub line: String,
+    /// The cursor's column. Not `line.chars().count()`: a double-width glyph is one
+    /// `char` and two columns.
+    pub cursor_col: u16,
+    /// Whether every column from the cursor to the end of the row is blank.
+    ///
+    /// Answered here because this is the only place that can: `line` stops at the
+    /// cursor, so nothing downstream can see what follows it.
+    pub at_line_end: bool,
+}
+
+/// Read the cursor's row up to the cursor, or `None` when it is not an input line.
+///
+/// Deliberately not part of [`snapshot`]: that runs for every visible pane every
+/// frame, while this is wanted for one pane and only when something asked for it.
+///
+/// `None` in five cases, each of which would produce a *wrong* answer rather than a
+/// missing one:
+///
+/// - the **alternate screen**, where a row is a full-screen program's canvas and not
+///   an input line. This is a privacy property as much as a drawing one: it is why
+///   what you type into `vim` or a TUI password box is never reported;
+/// - a **scrolled-back** viewport, where the cursor is not where typing lands;
+/// - a cursor **outside the visible rows**, for the same reason;
+/// - a **continuation row**, where the command began on the row above and this row
+///   holds only its tail. A partial prefix yields confidently wrong completions;
+/// - a row containing a **`HIDDEN`** cell. SGR 8 is what a password prompt uses when
+///   it wants the characters present but invisible (see `color::resolve`), so the
+///   text really is in the grid. This check has to live here: `CellFlags` does not
+///   carry `HIDDEN`, because downstream it is only ever a color change, so there is
+///   no later place to notice.
+pub fn input_line(term: &Term<EventProxy>) -> Option<InputLine> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+
+    let grid = term.grid();
+    if grid.display_offset() != 0 {
+        return None;
+    }
+
+    let point = grid.cursor.point;
+    let rows = grid.screen_lines() as i32;
+    if point.line.0 < 0 || point.line.0 >= rows {
+        return None;
+    }
+
+    let columns = grid.columns();
+    // `WRAPLINE` sits on the last cell of the row that wrapped, so the row *above* is
+    // what says this one is a continuation. Guarded against indexing past the top of
+    // the scrollback.
+    if point.line.0 > -(grid.history_size() as i32) {
+        let above = &grid[Line(point.line.0 - 1)];
+        if above[Column(columns - 1)].flags.contains(Flags::WRAPLINE) {
+            return None;
+        }
+    }
+
+    let cursor_col = (point.column.0).min(columns);
+    let row = &grid[point.line];
+
+    let mut line = String::with_capacity(cursor_col);
+    for col in 0..cursor_col {
+        let cell = &row[Column(col)];
+        if cell.flags.contains(Flags::HIDDEN) {
+            return None;
+        }
+        // The second half of a wide glyph carries no character of its own; pushing it
+        // would insert a space into the middle of a CJK word.
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        line.push(cell.c);
+    }
+
+    // Whether anything is written to the right of the cursor. Cheap here — the row
+    // is already in hand — and impossible anywhere else, since `line` stops at the
+    // cursor.
+    let at_line_end = (cursor_col..columns).all(|col| {
+        let c = row[Column(col)].c;
+        c == ' ' || c == '\0'
+    });
+
+    // `line` is not trimmed: `git ` and `git` are different prefixes, so a trailing
+    // space before the cursor is load-bearing for anything matching against it.
+    Some(InputLine {
+        line,
+        cursor_col: cursor_col as u16,
+        at_line_end,
+    })
+}
+
+/// Where a hint would be drawn: the cursor's `(column, row)` in viewport coordinates.
+///
+/// Separate from [`RenderCursor`] because that describes the cursor as *drawn*, and is
+/// deliberately `None` on the dark half of a blink. Ghost text must not blink with the
+/// cursor — the suggestion is not the cursor, and flashing it is unreadable — so it
+/// anchors on position, which does not blink.
+///
+/// Still `None` when the program hid the cursor with DECTCEM, or when the cursor is
+/// scrolled out of view. A program that hid its cursor is not sitting at a prompt.
+pub fn cursor_anchor(term: &Term<EventProxy>) -> Option<(u16, u16)> {
+    if !term.mode().contains(TermMode::SHOW_CURSOR) {
+        return None;
+    }
+    let grid = term.grid();
+    let rows = grid.screen_lines() as u16;
+    let point = grid.cursor.point;
+    let row = viewport_row(point, grid.display_offset(), rows)?;
+    Some((point.column.0.min(grid.columns()) as u16, row))
+}
+
+/// Append `hint` as dim "ghost" cells starting at `anchor`. Returns the number of
+/// columns filled, which is 0 whenever a guard refused.
+///
+/// Separate from [`snapshot`] on purpose: the snapshot is a faithful copy of the grid
+/// and nothing else, so adding cells the terminal never wrote is a step the caller
+/// opts into and a reader can find.
+///
+/// `anchor` is passed in rather than read from [`TerminalFrame::cursor`] so the hint
+/// does not inherit the cursor's blink — see [`cursor_anchor`], which is how a caller
+/// should obtain it.
+///
+/// Refuses unless every column from the anchor to the end of its row is empty.
+/// [`snapshot`] omits blank default-background cells, so any cell still present at or
+/// after the anchor is something visible, and a hint must never hide what a program
+/// printed.
+///
+/// The caller owns the two guards a frame cannot express: that the pane has focus,
+/// and that it is not on the alternate screen.
+pub fn draw_inline_hint(
+    frame: &mut TerminalFrame,
+    anchor: (u16, u16),
+    hint: &str,
+    fg: Rgba,
+) -> u16 {
+    let (start_col, row) = anchor;
+    if hint.is_empty() || frame.display_offset != 0 {
+        return 0;
+    }
+    if frame
+        .cells
+        .iter()
+        .any(|c| c.row == row && c.col >= start_col)
+    {
+        return 0;
+    }
+
+    let mut col = start_col;
+    for ch in hint.chars() {
+        // A control character would draw as a replacement box, or be mistaken for
+        // movement by a reader of this vector.
+        if ch.is_control() {
+            break;
+        }
+        let width = match unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) {
+            // A combining mark with no base glyph of its own in the hint.
+            0 => continue,
+            w => w as u16,
+        };
+        // Truncated at the last column, never wrapped: a hint is speculative, and
+        // wrapping one would push real output down a row.
+        if col as u32 + width as u32 > frame.columns as u32 {
+            break;
+        }
+        frame.cells.push(RenderCell {
+            col,
+            row,
+            ch,
+            zerowidth: Vec::new(),
+            fg,
+            // The default background, so `build_pane`'s background pass emits no quad:
+            // a hint costs one textured instance per glyph and nothing else.
+            bg: frame.background,
+            underline_color: None,
+            flags: CellFlags {
+                wide: width == 2,
+                ..Default::default()
+            },
+        });
+        col += width;
+    }
+
+    col - start_col
+}
+
 /// Convert a grid point to a viewport row, or `None` if it is scrolled off.
 fn viewport_row(point: Point, display_offset: usize, rows: u16) -> Option<u16> {
     // Grid lines are signed: negative values are scrollback above the viewport.
@@ -347,6 +541,231 @@ mod tests {
 
     fn cell_at(frame: &TerminalFrame, col: u16, row: u16) -> Option<&RenderCell> {
         frame.cells.iter().find(|c| c.col == col && c.row == row)
+    }
+
+    fn read_line(s: &Session) -> Option<InputLine> {
+        input_line(&s.term().lock())
+    }
+
+    fn anchor(s: &Session) -> (u16, u16) {
+        cursor_anchor(&s.term().lock()).expect("a visible cursor should have an anchor")
+    }
+
+    #[test]
+    fn the_input_line_is_the_row_left_of_the_cursor() {
+        let s = session(20, 3);
+        s.feed_for_test(b"$ git st");
+
+        assert_eq!(
+            read_line(&s).expect("a fresh prompt row should be an input line"),
+            InputLine {
+                line: "$ git st".to_owned(),
+                cursor_col: 8,
+                at_line_end: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_cursor_inside_the_line_is_not_at_the_end_of_it() {
+        // The fact a plugin cannot work out for itself, and the one that decides
+        // whether appending a suggestion is safe at all.
+        let s = session(20, 3);
+        s.feed_for_test(b"ls -la\x1b[3D");
+
+        let read = read_line(&s).unwrap();
+        assert_eq!(read.line, "ls ");
+        assert!(!read.at_line_end);
+    }
+
+    #[test]
+    fn the_input_line_stops_at_the_cursor_not_the_end_of_the_row() {
+        // Typing in the middle of a line: only what is left of the cursor is a prefix.
+        let s = session(20, 3);
+        s.feed_for_test(b"abcdef\x1b[3D");
+
+        let read = read_line(&s).expect("a mid-line cursor still has an input line");
+        assert_eq!(read.line, "abc");
+        assert_eq!(read.cursor_col, 3);
+    }
+
+    #[test]
+    fn trailing_spaces_before_the_cursor_are_kept() {
+        // `git ` and `git` are different prefixes; trimming would suggest against the
+        // wrong one.
+        let s = session(20, 3);
+        s.feed_for_test(b"git  ");
+
+        assert_eq!(read_line(&s).unwrap().line, "git  ");
+    }
+
+    #[test]
+    fn a_wide_glyph_is_one_char_and_two_columns() {
+        // The invariant that justifies carrying `cursor_col` separately at all.
+        let s = session(20, 3);
+        s.feed_for_test("日本x".as_bytes());
+
+        let read = read_line(&s).unwrap();
+        assert_eq!(read.line, "日本x");
+        assert_eq!(read.cursor_col, 5);
+    }
+
+    #[test]
+    fn a_full_screen_program_has_no_input_line() {
+        // Named for the privacy property, not the drawing one: this is what keeps
+        // what you type into vim or a TUI password box from reaching a plugin.
+        let s = session(20, 3);
+        s.feed_for_test(b"\x1b[?1049hsecret in a tui");
+
+        assert!(read_line(&s).is_none());
+    }
+
+    #[test]
+    fn a_row_with_hidden_cells_has_no_input_line() {
+        // SGR 8 keeps the characters in the grid and only hides them, which is exactly
+        // what a password prompt does. Reading the row would hand over the password.
+        let s = session(20, 3);
+        s.feed_for_test(b"\x1b[8mhunter2");
+
+        assert!(read_line(&s).is_none());
+    }
+
+    #[test]
+    fn a_scrolled_back_view_has_no_input_line() {
+        let s = session(20, 3);
+        s.feed_for_test(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        s.scroll(2);
+
+        assert!(read_line(&s).is_none());
+    }
+
+    #[test]
+    fn a_wrapped_command_reports_no_input_line() {
+        // The cursor row holds only the tail of the command, and a tail is not a
+        // prefix — suggesting from it would be confidently wrong.
+        let s = session(6, 3);
+        s.feed_for_test(b"abcdefgh");
+
+        assert!(read_line(&s).is_none());
+    }
+
+    #[test]
+    fn a_hint_becomes_cells_starting_at_the_cursor() {
+        let s = session(20, 3);
+        s.feed_for_test(b"git st");
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "atus", Rgba::rgb(1, 2, 3)),
+            4
+        );
+        // Five, not six, for `git st`: the space is a blank default-background cell,
+        // which the snapshot omits. Plus the four hint cells.
+        assert_eq!(f.cells.len(), 9);
+        assert_eq!(cell_at(&f, 6, 0).unwrap().ch, 'a');
+        assert_eq!(cell_at(&f, 6, 0).unwrap().fg, Rgba::rgb(1, 2, 3));
+        assert_eq!(cell_at(&f, 9, 0).unwrap().ch, 's');
+    }
+
+    #[test]
+    fn a_hint_never_covers_what_the_program_printed() {
+        // Cursor moved back to column 0 with text still to its right.
+        let s = session(20, 3);
+        s.feed_for_test(b"ls -la\x1b[6D");
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "atus", Rgba::rgb(1, 2, 3)),
+            0
+        );
+        // `ls -la` is five cells; the space is blank and omitted.
+        assert_eq!(f.cells.len(), 5);
+    }
+
+    #[test]
+    fn a_hint_is_truncated_at_the_last_column_not_wrapped() {
+        let s = session(10, 2);
+        s.feed_for_test(b"abc");
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "defghijklmnop", Rgba::rgb(1, 2, 3)),
+            7
+        );
+        assert_eq!(f.cells.iter().filter(|c| c.row == 0).count(), 10);
+        assert!(f.cells.iter().all(|c| c.row == 0 && c.col < 10));
+    }
+
+    #[test]
+    fn a_wide_hint_glyph_takes_two_columns_and_is_dropped_rather_than_split() {
+        let s = session(5, 2);
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "日本語", Rgba::rgb(1, 2, 3)),
+            4
+        );
+        assert!(cell_at(&f, 0, 0).unwrap().flags.wide);
+        assert_eq!(cell_at(&f, 2, 0).unwrap().ch, '本');
+        assert!(cell_at(&f, 4, 0).is_none());
+    }
+
+    #[test]
+    fn a_program_that_hid_its_cursor_has_no_anchor() {
+        // DECTCEM. A program that hid its cursor is not sitting at a prompt, so there is
+        // nowhere a suggestion belongs — and the caller never gets an anchor to pass.
+        let s = session(20, 3);
+        s.feed_for_test(b"\x1b[?25lgit st");
+
+        assert!(cursor_anchor(&s.term().lock()).is_none());
+    }
+
+    #[test]
+    fn a_hint_does_not_blink_with_the_cursor() {
+        // The anchor exists so ghost text is not tied to the cursor's blink phase.
+        // `snapshot` sets `cursor: None` on the dark half of a blink, and a hint keyed
+        // off that flashed on and off — unreadable, and the reason the anchor is a
+        // parameter rather than being read back out of the frame.
+        let s = session(20, 3);
+        s.feed_for_test(b"git st");
+        let theme = Theme::builtin_default();
+        let cfg = Config::default();
+
+        // The dark half of the blink: the cursor is not drawn.
+        let mut dark = snapshot(&s.term().lock(), &theme, &cfg, true, false);
+        assert!(dark.cursor.is_none(), "the blink-off frame draws no cursor");
+
+        // The hint is drawn anyway, in exactly the same place as on the lit half.
+        assert_eq!(
+            draw_inline_hint(&mut dark, anchor(&s), "atus", Rgba::rgb(1, 2, 3)),
+            4
+        );
+        assert_eq!(cell_at(&dark, 6, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn an_empty_hint_changes_nothing() {
+        let s = session(20, 3);
+        s.feed_for_test(b"git st");
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "", Rgba::rgb(1, 2, 3)),
+            0
+        );
+        assert_eq!(f.cells.len(), 5);
+    }
+
+    #[test]
+    fn a_control_character_ends_a_hint() {
+        let s = session(20, 3);
+        let mut f = snap(&s);
+
+        assert_eq!(
+            draw_inline_hint(&mut f, anchor(&s), "ab\ncd", Rgba::rgb(1, 2, 3)),
+            2
+        );
+        assert!(f.cells.iter().all(|c| c.ch != '\n'));
     }
 
     #[test]
