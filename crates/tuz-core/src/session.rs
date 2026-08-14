@@ -765,10 +765,7 @@ mod select_all_tests {
         let mut cfg = Config::default();
         cfg.shell.program = Some("/bin/sh".to_owned());
         // Ignores SIGHUP and sleeps: the least cooperative thing a shell can be.
-        cfg.shell.args = vec![
-            "-c".to_owned(),
-            "trap '' HUP TERM; sleep 30".to_owned(),
-        ];
+        cfg.shell.args = vec!["-c".to_owned(), "trap '' HUP TERM; sleep 30".to_owned()];
 
         let size = TermSize::new(80, 24, 8, 16);
         let Ok(mut session) = Session::spawn(PaneId(1), &cfg, size, tx, Arc::new(|| {})) else {
@@ -787,5 +784,4 @@ mod select_all_tests {
             "shutdown took {took:?}: closing a tab is waiting for the child to die"
         );
     }
-
 }

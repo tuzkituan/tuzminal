@@ -120,10 +120,7 @@ impl PluginsPage {
             // Runtime and version on the label rather than in a second column: the
             // toggle already owns the right-hand side of the row.
             let label = match &plugin.problem {
-                Some(problem) => format!(
-                    "{name}  {}  ({problem})",
-                    plugin.manifest.version
-                ),
+                Some(problem) => format!("{name}  {}  ({problem})", plugin.manifest.version),
                 None => format!(
                     "{name}  {}  {}",
                     plugin.manifest.version,
@@ -330,7 +327,8 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("tuz-plugins-{tag}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("tuz-plugins-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -512,18 +510,21 @@ mod tests {
         let mut config = Config::default();
         config.plugins.disable.push("off".to_owned());
 
-        let page = PluginsPage::open(vec![
-            Installed {
-                manifest: manifest("on"),
-                directory: PathBuf::from("/tmp/on"),
-                problem: None,
-            },
-            Installed {
-                manifest: manifest("off"),
-                directory: PathBuf::from("/tmp/off"),
-                problem: None,
-            },
-        ], PathBuf::from("/tmp"));
+        let page = PluginsPage::open(
+            vec![
+                Installed {
+                    manifest: manifest("on"),
+                    directory: PathBuf::from("/tmp/on"),
+                    problem: None,
+                },
+                Installed {
+                    manifest: manifest("off"),
+                    directory: PathBuf::from("/tmp/off"),
+                    problem: None,
+                },
+            ],
+            PathBuf::from("/tmp"),
+        );
 
         let toggles: Vec<(String, bool)> = page
             .widgets(&config)
@@ -552,11 +553,14 @@ mod tests {
     #[test]
     fn toggling_a_row_updates_the_config_and_asks_for_a_reload() {
         let mut config = Config::default();
-        let mut page = PluginsPage::open(vec![Installed {
-            manifest: manifest("thing"),
-            directory: PathBuf::from("/tmp/thing"),
-            problem: None,
-        }], PathBuf::from("/tmp"));
+        let mut page = PluginsPage::open(
+            vec![Installed {
+                manifest: manifest("thing"),
+                directory: PathBuf::from("/tmp/thing"),
+                problem: None,
+            }],
+            PathBuf::from("/tmp"),
+        );
 
         let outcome = page.apply(
             tuz_ui::UiAction::Toggled(WidgetId(ids::PLUGIN_BASE), false),
@@ -609,7 +613,9 @@ mod tests {
 
         let mut page = PluginsPage::open(Vec::new(), tmp.0.clone());
         assert!(!page.folder_chosen(FolderPurpose::ImportPlugin, empty));
-        assert!(page.last_message().is_some_and(|m| m.contains("plugin.toml")));
+        assert!(page
+            .last_message()
+            .is_some_and(|m| m.contains("plugin.toml")));
     }
 
     #[test]

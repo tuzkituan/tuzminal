@@ -428,9 +428,7 @@ impl App {
         // Config decides, with one exception: a plugin contributing segments still
         // forces the strip to appear, so turning the built-in content off does not
         // silently swallow a plugin the user installed.
-        if !self.settings.config().status_bar.enabled
-            && self.plugins.status_segments().is_empty()
-        {
+        if !self.settings.config().status_bar.enabled && self.plugins.status_segments().is_empty() {
             return 0;
         }
         self.cell_size().height + CHROME_PADDING
@@ -451,10 +449,10 @@ impl App {
             return 0;
         }
         let cfg = self.settings.config();
-        let cells = cfg
-            .explorer
-            .width
-            .clamp(tuz_config::EXPLORER_MIN_WIDTH, tuz_config::EXPLORER_MAX_WIDTH);
+        let cells = cfg.explorer.width.clamp(
+            tuz_config::EXPLORER_MIN_WIDTH,
+            tuz_config::EXPLORER_MAX_WIDTH,
+        );
         cells as u32 * self.cell_size().width
     }
 
@@ -518,9 +516,7 @@ impl App {
         }
         match self.layout.active_kind() {
             // All three live behind one button now, so it lights for any of them.
-            TabKind::Settings | TabKind::Help | TabKind::Plugins => {
-                out.push(ChromeButton::AppMenu)
-            }
+            TabKind::Settings | TabKind::Help | TabKind::Plugins => out.push(ChromeButton::AppMenu),
             TabKind::Terminal => {}
         }
         out
@@ -730,7 +726,10 @@ impl App {
                 let font_size = cfg.font.size;
                 let show = cfg.status_bar.clone();
                 let width = self.gpu.as_ref().map_or(0, |g| g.size().0) as f32;
-                let directory = self.cwd.get(active, pid, Instant::now()).map(std::path::Path::to_owned);
+                let directory = self
+                    .cwd
+                    .get(active, pid, Instant::now())
+                    .map(std::path::Path::to_owned);
 
                 crate::status::build(&crate::status::StatusInput {
                     directory: directory.as_deref(),
@@ -758,10 +757,13 @@ impl App {
             .map(|i| self.tab_title(i))
             .collect();
 
-
         // A maximized window is flush with the screen edges, and rounding there just
         // punches holes showing the desktop through the corners.
-        let maximized = self.window.as_ref().map(|w| w.is_maximized()).unwrap_or(false);
+        let maximized = self
+            .window
+            .as_ref()
+            .map(|w| w.is_maximized())
+            .unwrap_or(false);
         let tab_activity: Vec<bool> = self
             .layout
             .tabs()
@@ -803,15 +805,12 @@ impl App {
         let hovered_close = self.hovered_close;
         // Widgets are built here, before the `&mut` field borrows, because building a
         // row needs to read the config.
-        let panel_widgets: Option<(Vec<Widget>, Vec<Widget>)> = self
-            .panel
-            .as_ref()
-            .map(|panel| {
-                (
-                    panel.widgets(self.settings.config()),
-                    panel.footer_widgets(),
-                )
-            });
+        let panel_widgets: Option<(Vec<Widget>, Vec<Widget>)> = self.panel.as_ref().map(|panel| {
+            (
+                panel.widgets(self.settings.config()),
+                panel.footer_widgets(),
+            )
+        });
 
         let pressed_button = self.pressed_button;
         let hovered_ide = self.hovered_ide;
@@ -833,13 +832,10 @@ impl App {
                 )
             });
 
-        let plugins_widgets: Option<(Vec<Widget>, Vec<Widget>)> =
-            self.plugins_page.as_ref().map(|page| {
-                (
-                    page.widgets(self.settings.config()),
-                    page.footer_widgets(),
-                )
-            });
+        let plugins_widgets: Option<(Vec<Widget>, Vec<Widget>)> = self
+            .plugins_page
+            .as_ref()
+            .map(|page| (page.widgets(self.settings.config()), page.footer_widgets()));
         let plugins_page_rect: Option<Rect> = (self.layout.active_kind() == TabKind::Plugins)
             .then(|| frame.panes.first().map(|p| p.rect))
             .flatten();
@@ -895,7 +891,11 @@ impl App {
         // window's own background is this quad, so the pixels outside the curve stay
         // transparent and the compositor shows what is behind. Clearing to the
         // background color instead would paint square corners no later quad can undo.
-        let radius = if maximized { 0.0 } else { Self::corner_radius(cfg) };
+        let radius = if maximized {
+            0.0
+        } else {
+            Self::corner_radius(cfg)
+        };
         if radius > 0.0 {
             let window = Rect::from_size(gpu.size().0, gpu.size().1);
             instances.push(Instance::rounded(
@@ -981,7 +981,6 @@ impl App {
                 colors,
                 radius,
             );
-
 
             tuz_render::chrome::draw_chrome_buttons(
                 instances,
@@ -1208,16 +1207,15 @@ impl App {
             (help_widgets, help_page, self.help.as_mut())
         {
             tuz_render::draw_page_frame(instances, rect, theme, colors, radius);
-            let body =
-                tuz_render::draw_panel_title(
-                    instances,
-                    fonts,
-                    rect,
-                    "Shortcuts",
-                    theme,
-                    colors,
-                    cell.height as f32,
-                );
+            let body = tuz_render::draw_panel_title(
+                instances,
+                fonts,
+                rect,
+                "Shortcuts",
+                theme,
+                colors,
+                cell.height as f32,
+            );
             page.ui.layout_split_with(
                 &widgets,
                 &[],
@@ -1280,7 +1278,14 @@ impl App {
             // Rows are clipped to the scrolling region, so a scrolled list cannot draw
             // over the title bar or down into the footer.
             widget_start = instances.len() as u32;
-            tuz_render::draw_widgets_in(instances, fonts, panel.ui.body(), &panel.ui, theme, colors);
+            tuz_render::draw_widgets_in(
+                instances,
+                fonts,
+                panel.ui.body(),
+                &panel.ui,
+                theme,
+                colors,
+            );
             widget_end = instances.len() as u32;
 
             // Footer buttons are drawn after the clipped range so they are never cut
@@ -1307,15 +1312,7 @@ impl App {
                 .enumerate()
                 .map(|(i, item)| (menu.row_rect(rect, i, cell.height), item.label.as_str()))
                 .collect();
-            tuz_render::draw_menu(
-                instances,
-                fonts,
-                rect,
-                &rows,
-                menu.selected,
-                theme,
-                colors,
-            );
+            tuz_render::draw_menu(instances, fonts, rect, &rows, menu.selected, theme, colors);
             menu_rect = Some(rect);
         }
 
@@ -1824,8 +1821,9 @@ impl App {
     fn explorer_key(&mut self, chord: &tuz_input::KeyChord, event: &winit::event::KeyEvent) {
         use tuz_input::{Key, NamedKey as N};
 
-        let plain =
-            !self.modifiers.control_key() && !self.modifiers.alt_key() && !self.modifiers.super_key();
+        let plain = !self.modifiers.control_key()
+            && !self.modifiers.alt_key()
+            && !self.modifiers.super_key();
 
         // A prompt is modal within the sidebar: while one is open every key belongs to
         // it, or typing a name would also be navigating the list underneath.
@@ -1961,16 +1959,12 @@ impl App {
             self.close_menu();
             return;
         }
-        let Some(anchor) = self
-            .frame
-            .as_ref()
-            .and_then(|f| {
-                f.actions
-                    .iter()
-                    .find(|(b, _)| *b == ChromeButton::NewTabMenu)
-                    .map(|(_, rect)| *rect)
-            })
-        else {
+        let Some(anchor) = self.frame.as_ref().and_then(|f| {
+            f.actions
+                .iter()
+                .find(|(b, _)| *b == ChromeButton::NewTabMenu)
+                .map(|(_, rect)| *rect)
+        }) else {
             return;
         };
 
@@ -2066,13 +2060,17 @@ impl App {
             return;
         };
 
-        let items = [("Settings", "settings"), ("Shortcuts", "help"), ("Plugins", "plugins")]
-            .into_iter()
-            .map(|(label, value)| crate::menu::MenuItem {
-                label: label.to_owned(),
-                value: value.to_owned(),
-            })
-            .collect();
+        let items = [
+            ("Settings", "settings"),
+            ("Shortcuts", "help"),
+            ("Plugins", "plugins"),
+        ]
+        .into_iter()
+        .map(|(label, value)| crate::menu::MenuItem {
+            label: label.to_owned(),
+            value: value.to_owned(),
+        })
+        .collect();
 
         self.menu = Some(crate::menu::Menu::new(
             crate::menu::MenuKind::AppMenu,
@@ -2213,9 +2211,7 @@ impl App {
         };
 
         std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .set_title(title)
-                .pick_folder();
+            let path = rfd::FileDialog::new().set_title(title).pick_folder();
             // A closed event loop means the terminal is shutting down; dropping the
             // answer is correct.
             let _ = proxy.send_event(UserEvent::FolderPicked { purpose, path });
@@ -3545,8 +3541,7 @@ impl App {
             .frame
             .as_ref()
             .map(|f| {
-                f.sidebar.width > 0
-                    && f.sidebar.contains(self.mouse.0 as i32, self.mouse.1 as i32)
+                f.sidebar.width > 0 && f.sidebar.contains(self.mouse.0 as i32, self.mouse.1 as i32)
             })
             .unwrap_or(false);
         if over_sidebar {

@@ -638,8 +638,8 @@ impl Ui {
             chars * metrics.char_width + metrics.char_width * 6
         };
 
-        let total: u32 = footer.iter().map(width_of).sum::<u32>()
-            + gap * footer.len().saturating_sub(1) as u32;
+        let total: u32 =
+            footer.iter().map(width_of).sum::<u32>() + gap * footer.len().saturating_sub(1) as u32;
 
         // Right-aligned, and clamped to the band so a narrow window pushes the row to
         // the left edge rather than off it.
@@ -657,7 +657,11 @@ impl Ui {
         let stacked = stacks_its_label(footer);
         let sole = stacked;
 
-        let mut x = if sole { band.x + metrics.padding as i32 } else { start };
+        let mut x = if sole {
+            band.x + metrics.padding as i32
+        } else {
+            start
+        };
         let y = band.y + metrics.padding as i32;
         for widget in footer {
             let width = if sole { available } else { width_of(widget) };
@@ -844,7 +848,8 @@ impl Ui {
 
     /// The interactive widget at a point, if any.
     pub fn hit(&self, x: i32, y: i32) -> Option<WidgetId> {
-        self.hit_index(x, y).and_then(|i| self.placed[i].widget.id())
+        self.hit_index(x, y)
+            .and_then(|i| self.placed[i].widget.id())
     }
 
     /// Index of the interactive row under a point.
@@ -2140,7 +2145,10 @@ mod footer_tests {
     }
 
     fn footer_rects(ui: &Ui) -> Vec<Rect> {
-        ui.placed()[ui.body().len()..].iter().map(|p| p.rect).collect()
+        ui.placed()[ui.body().len()..]
+            .iter()
+            .map(|p| p.rect)
+            .collect()
     }
 
     #[test]

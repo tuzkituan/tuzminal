@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per branch. A push supersedes the run before it, which is what should have
+# been cancelling the stale runs rather than someone doing it by hand.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Fail on warnings in CI while leaving local builds quiet.
@@ -41,7 +47,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev libfontconfig-1-dev \
+            libwayland-dev libxkbcommon-dev libfontconfig-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev
 
       - name: Build
@@ -74,7 +80,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev libfontconfig-1-dev \
+            libwayland-dev libxkbcommon-dev libfontconfig-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev
 
       - name: Formatting
@@ -88,9 +94,28 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # The action publishes its findings as a check run, which the default read-only
+    # token cannot create — it failed with "Resource not accessible by integration",
+    # which reads like a vulnerability was found and is actually a permissions error.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+        # Advisories are reported, and only real vulnerabilities stop the build.
+        # `rustybuzz` and `ttf-parser` are both flagged unmaintained upstream, with
+        # `harfrust` and `skrifa` as successors — a migration worth doing and not a
+        # reason to paint every commit red until it happens. `cargo audit` finds
+        # zero actual vulnerabilities today.
+        continue-on-error: true
+
+      - name: Fail only on vulnerabilities
+        run: |
+          cargo install cargo-audit --locked
+          # `--deny warnings` is deliberately absent: informational advisories are
+          # visible in the step above without gating the build.
+          cargo audit --quiet

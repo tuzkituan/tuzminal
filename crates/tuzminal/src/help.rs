@@ -72,7 +72,12 @@ impl HelpPage {
             ),
             (
                 "Panels",
-                &["open_settings", "open_explorer", "open_plugins", "open_help"],
+                &[
+                    "open_settings",
+                    "open_explorer",
+                    "open_plugins",
+                    "open_help",
+                ],
             ),
         ];
 
@@ -233,7 +238,8 @@ mod tests {
                 continue;
             }
             assert!(
-                rows.iter().any(|(_, keys)| keys.split("  ").any(|k| k == chord)),
+                rows.iter()
+                    .any(|(_, keys)| keys.split("  ").any(|k| k == chord)),
                 "{chord} ({action}) is bound but not on the help page"
             );
         }

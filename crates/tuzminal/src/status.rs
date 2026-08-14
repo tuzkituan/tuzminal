@@ -131,7 +131,11 @@ pub fn build(input: &StatusInput<'_>) -> Vec<StatusSegment> {
                 plural(input.tabs, "tab")
             )));
         }
-        out.push(plain(format!("{} {}pt", input.theme, trim_size(input.font_size))));
+        out.push(plain(format!(
+            "{} {}pt",
+            input.theme,
+            trim_size(input.font_size)
+        )));
     }
 
     truncate_to_fit(out, input.cell_width, input.width)
@@ -304,8 +308,13 @@ mod tests {
         let home = Path::new("/home/tuan");
         // The non-Linux case, and the case where the shell has just exited.
         let out = build(&input(&show, home));
-        assert!(texts(&out).contains(&"80×24"), "the rest must still be built");
-        assert!(!texts(&out).iter().any(|t| t.starts_with('/') || t.starts_with('~')));
+        assert!(
+            texts(&out).contains(&"80×24"),
+            "the rest must still be built"
+        );
+        assert!(!texts(&out)
+            .iter()
+            .any(|t| t.starts_with('/') || t.starts_with('~')));
     }
 
     #[test]

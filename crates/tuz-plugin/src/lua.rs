@@ -1061,5 +1061,4 @@ return {
         let mut plugin = plugin(source).expect("should load");
         assert!(plugin.dispatch(&Event::Startup).is_err());
     }
-
 }

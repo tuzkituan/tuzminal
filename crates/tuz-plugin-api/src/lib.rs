@@ -144,7 +144,9 @@ pub enum Event {
     ///
     /// Only segments given an `id` are clickable; the rest are drawn and ignored,
     /// which keeps a clock from swallowing a press meant for the window behind it.
-    StatusSegmentClick { id: String },
+    StatusSegmentClick {
+        id: String,
+    },
 
     /// A command the plugin registered was invoked.
     Command {

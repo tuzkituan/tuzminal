@@ -165,7 +165,10 @@ impl Host {
                 commands
             }
             Err(e) => {
-                log::warn!("plugin `{}` failed handling a click: {e}", plugin.manifest.name);
+                log::warn!(
+                    "plugin `{}` failed handling a click: {e}",
+                    plugin.manifest.name
+                );
                 Vec::new()
             }
         }
@@ -176,7 +179,9 @@ impl Host {
     ///
     /// The qualification happens here rather than in the plugin so a plugin cannot
     /// claim another's namespace by choosing a clever id.
-    pub fn status_segments_with_owner(&self) -> Vec<(tuz_plugin_api::StatusSegment, Option<String>)> {
+    pub fn status_segments_with_owner(
+        &self,
+    ) -> Vec<(tuz_plugin_api::StatusSegment, Option<String>)> {
         self.plugins
             .iter()
             .filter(|p| !p.disabled)
@@ -1157,8 +1162,14 @@ entry = "init.lua"
         assert!(errors.is_empty(), "{errors:?}");
 
         let binds = host.keybinds();
-        assert_eq!(binds.get("ctrl+shift+1").map(String::as_str), Some("alpha.go"));
-        assert_eq!(binds.get("ctrl+shift+2").map(String::as_str), Some("omega.go"));
+        assert_eq!(
+            binds.get("ctrl+shift+1").map(String::as_str),
+            Some("alpha.go")
+        );
+        assert_eq!(
+            binds.get("ctrl+shift+2").map(String::as_str),
+            Some("omega.go")
+        );
 
         let names = host.command_names();
         assert!(names.contains(&"alpha.go".to_owned()), "{names:?}");
@@ -1166,5 +1177,4 @@ entry = "init.lua"
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

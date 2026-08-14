@@ -539,7 +539,10 @@ impl Layout {
 
     /// The kind of the tab currently shown.
     pub fn active_kind(&self) -> TabKind {
-        self.tabs.get(self.active).map(|t| t.kind).unwrap_or_default()
+        self.tabs
+            .get(self.active)
+            .map(|t| t.kind)
+            .unwrap_or_default()
     }
 
     /// Close a whole tab. Returns the panes it held so their PTYs can be closed.
@@ -674,8 +677,12 @@ impl Layout {
         // Action buttons are square, sized from the strip height, and packed from the
         // right. Tabs then divide whatever is left, so a tab can never sit underneath
         // a button.
-        let leading: Vec<ChromeButton> =
-            opts.buttons.iter().copied().filter(|b| b.leading()).collect();
+        let leading: Vec<ChromeButton> = opts
+            .buttons
+            .iter()
+            .copied()
+            .filter(|b| b.leading())
+            .collect();
         let trailing: Vec<ChromeButton> = opts
             .buttons
             .iter()
@@ -1319,7 +1326,10 @@ mod chrome_tests {
         // window on a press. Counting the sidebar would make clicking a file move the
         // window instead of selecting it.
         assert!(!frame.is_chrome(10, 300));
-        assert!(frame.sidebar.contains(10, 300), "but it is still the sidebar");
+        assert!(
+            frame.sidebar.contains(10, 300),
+            "but it is still the sidebar"
+        );
     }
 
     #[test]

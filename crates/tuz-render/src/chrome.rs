@@ -640,7 +640,8 @@ mod tests {
         // Anything one pixel wide starting exactly at the strip's left edge is the
         // separator, and it would cut across the corner the strip just rounded.
         assert!(
-            !out.iter().any(|i| i.position[0] == bar.x as f32 && i.size[0] == 1.0),
+            !out.iter()
+                .any(|i| i.position[0] == bar.x as f32 && i.size[0] == 1.0),
             "nothing should be drawn along the strip's left edge"
         );
     }
@@ -802,7 +803,10 @@ mod tests {
         };
 
         // Idle: the inactive tab recedes. With output: it does not.
-        assert!(count(&idle, dim) > 0, "an idle background tab should be dimmed");
+        assert!(
+            count(&idle, dim) > 0,
+            "an idle background tab should be dimmed"
+        );
         assert!(
             count(&busy, dim) < count(&idle, dim),
             "unseen output should undim the tab"
@@ -1227,5 +1231,4 @@ mod tests {
             "the button that loses work should say so"
         );
     }
-
 }

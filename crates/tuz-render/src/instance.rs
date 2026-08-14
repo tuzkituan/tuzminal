@@ -121,14 +121,7 @@ impl Instance {
     }
 
     /// A solid rectangle turned about its own center.
-    pub fn rotated(
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        color: [f32; 4],
-        radians: f32,
-    ) -> Self {
+    pub fn rotated(x: f32, y: f32, width: f32, height: f32, color: [f32; 4], radians: f32) -> Self {
         Self {
             position: [x, y],
             size: [width, height],

@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn a_path_outside_home_stays_absolute() {
         let home = Path::new("/home/tuan");
-        assert_eq!(display_path(Path::new("/etc/hosts"), Some(home)), "/etc/hosts");
+        assert_eq!(
+            display_path(Path::new("/etc/hosts"), Some(home)),
+            "/etc/hosts"
+        );
         // A shared prefix is not a parent: `/home/tuan2` must not become `~2`.
         assert_eq!(
             display_path(Path::new("/home/tuan2/src"), Some(home)),

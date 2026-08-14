@@ -130,8 +130,7 @@ fn run_item_action(paths: &Paths, kind: pkg::Kind, action: ItemAction) -> Result
 /// Write the desktop entry and icon, reporting where they went.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn install_desktop_entry() -> Result<()> {
-    let data_home = desktop::data_home()
-        .context("could not determine $XDG_DATA_HOME or $HOME")?;
+    let data_home = desktop::data_home().context("could not determine $XDG_DATA_HOME or $HOME")?;
 
     // The running binary's own path, so an entry installed from a build in one place
     // does not point at a copy somewhere else.

@@ -60,11 +60,19 @@ impl Entry {
 /// A modal question at the foot of the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt {
-    Rename { from: PathBuf, value: String },
-    NewFolder { value: String },
+    Rename {
+        from: PathBuf,
+        value: String,
+    },
+    NewFolder {
+        value: String,
+    },
     /// `entries` is how many things are inside, so the confirmation can say what it
     /// is about to destroy rather than just asking.
-    Delete { path: PathBuf, entries: usize },
+    Delete {
+        path: PathBuf,
+        entries: usize,
+    },
 }
 
 /// What the app should do after handling an explorer event.
@@ -358,7 +366,11 @@ impl Explorer {
                     self.prompt = Some(prompt.clone());
                     return Err("a name cannot be empty".to_owned());
                 }
-                if name.contains(std::path::MAIN_SEPARATOR) {
+                // `is_separator`, not `MAIN_SEPARATOR`: on Windows both `/` and `\`
+                // separate paths, and `fs::rename` honours both — so checking only the
+                // primary one let `../escaped.txt` through and turned a rename into a
+                // move. On Unix `\` is a legal filename character and stays allowed.
+                if name.chars().any(std::path::is_separator) {
                     self.prompt = Some(prompt.clone());
                     return Err("a name cannot contain a path separator".to_owned());
                 }
@@ -463,7 +475,9 @@ fn read_dir(dir: &Path, show_hidden: bool) -> (Vec<Entry>, usize) {
         };
 
         let size = if is_dir {
-            std::fs::read_dir(&path).ok().map(|d| d.flatten().count() as u64)
+            std::fs::read_dir(&path)
+                .ok()
+                .map(|d| d.flatten().count() as u64)
         } else {
             // A broken link has no metadata; the row still lists, without a size.
             std::fs::symlink_metadata(&path).ok().map(|m| m.len())
@@ -637,10 +651,7 @@ mod tests {
         ];
         sort_entries(&mut rows);
         let names: Vec<&str> = rows.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["..", "assets", "src", "Cargo.toml", "zebra.txt"]
-        );
+        assert_eq!(names, ["..", "assets", "src", "Cargo.toml", "zebra.txt"]);
     }
 
     #[test]
@@ -672,7 +683,10 @@ mod tests {
         ];
         sort_entries(&mut a);
         sort_entries(&mut b);
-        assert_eq!(a, b, "the same set must sort the same way whatever order it arrives in");
+        assert_eq!(
+            a, b,
+            "the same set must sort the same way whatever order it arrives in"
+        );
     }
 
     #[test]
@@ -691,7 +705,8 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("tuz-explorer-{tag}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("tuz-explorer-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -765,7 +780,10 @@ mod tests {
         assert!(ex.begin_delete());
         match ex.prompt() {
             Some(Prompt::Delete { entries, .. }) => {
-                assert_eq!(*entries, 1, "the prompt must say what it is about to destroy")
+                assert_eq!(
+                    *entries, 1,
+                    "the prompt must say what it is about to destroy"
+                )
             }
             other => panic!("expected a delete prompt, got {other:?}"),
         }
@@ -830,7 +848,11 @@ mod tests {
         std::fs::write(tmp.0.join("other.txt"), b"x").unwrap();
 
         let mut ex = Explorer::open(tmp.0.clone(), false);
-        ex.selected = ex.entries.iter().position(|e| e.name == "other.txt").unwrap();
+        ex.selected = ex
+            .entries
+            .iter()
+            .position(|e| e.name == "other.txt")
+            .unwrap();
         assert!(ex.begin_rename());
         for _ in 0.."other.txt".len() {
             ex.prompt_backspace();
@@ -844,7 +866,10 @@ mod tests {
             "the existing file must be untouched"
         );
         assert!(tmp.0.join("other.txt").exists());
-        assert!(ex.prompt().is_some(), "and the prompt stays open to be corrected");
+        assert!(
+            ex.prompt().is_some(),
+            "and the prompt stays open to be corrected"
+        );
     }
 
     #[test]
@@ -909,12 +934,20 @@ mod tests {
         std::fs::write(tmp.0.join("notes.txt"), b"x").unwrap();
         let mut ex = Explorer::open(tmp.0.clone(), false);
 
-        ex.selected = ex.entries.iter().position(|e| e.name == "notes.txt").unwrap();
+        ex.selected = ex
+            .entries
+            .iter()
+            .position(|e| e.name == "notes.txt")
+            .unwrap();
         assert_eq!(
             ex.activate(),
             ExplorerOutcome::OpenEditor(tmp.0.join("notes.txt"))
         );
-        assert_eq!(ex.dir(), tmp.0, "activating a file must not change directory");
+        assert_eq!(
+            ex.dir(),
+            tmp.0,
+            "activating a file must not change directory"
+        );
     }
 
     #[test]

@@ -438,7 +438,6 @@ impl SettingsPanel {
             PanelOutcome::Continue
         }
     }
-
 }
 
 /// Assign only if different, reporting whether it changed.
@@ -633,7 +632,14 @@ mod tests {
             let outcome = match widget {
                 Widget::Toggle { on, .. } => panel.apply(UiAction::Toggled(id, !on), &mut config),
                 Widget::Select { index, options, .. } => {
-                    let next = (index + 1) % options.len().max(1);
+                    // A picker with one option cannot change, and driving it proves
+                    // nothing. This is not hypothetical: on a system with no
+                    // `/etc/shells` the shell picker offers only "Default", which is
+                    // how this test failed on Windows.
+                    if options.len() < 2 {
+                        continue;
+                    }
+                    let next = (index + 1) % options.len();
                     panel.apply(UiAction::Selected(id, next), &mut config)
                 }
                 Widget::Stepper {

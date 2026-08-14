@@ -169,7 +169,10 @@ mod tests {
         // button anchored there is exactly where these buttons live.
         let m = menu(Rect::new(790, 0, 40, 40), 3);
         let rect = m.rect(WINDOW, CELL);
-        assert!(rect.right() <= WINDOW.right(), "{rect:?} runs off the right");
+        assert!(
+            rect.right() <= WINDOW.right(),
+            "{rect:?} runs off the right"
+        );
         assert!(rect.x >= WINDOW.x);
     }
 
@@ -177,7 +180,10 @@ mod tests {
     fn a_menu_with_no_room_below_opens_upwards() {
         let m = menu(Rect::new(10, 580, 40, 20), 5);
         let rect = m.rect(WINDOW, CELL);
-        assert!(rect.bottom() <= WINDOW.bottom(), "{rect:?} runs off the bottom");
+        assert!(
+            rect.bottom() <= WINDOW.bottom(),
+            "{rect:?} runs off the bottom"
+        );
         assert!(rect.y < 580, "it should open above the button");
     }
 
@@ -196,7 +202,11 @@ mod tests {
         for i in 1..4 {
             let above = m.row_rect(rect, i - 1, CELL.1);
             let here = m.row_rect(rect, i, CELL.1);
-            assert_eq!(above.bottom(), here.y, "row {i} does not meet the one above");
+            assert_eq!(
+                above.bottom(),
+                here.y,
+                "row {i} does not meet the one above"
+            );
         }
     }
 

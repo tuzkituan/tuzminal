@@ -18,17 +18,17 @@ pub mod instance;
 pub mod text;
 pub mod widget;
 
+pub use chrome::PADDING as SEGMENT_PADDING;
 pub use chrome::{
     draw_chrome_buttons, draw_status_bar, draw_tab_bar, draw_tooltip, StatusItem, TabLabel,
 };
 pub use instance::{
     build_pane, ColorSpace, Instance, PaneGeometry, FLAG_COLOR_GLYPH, FLAG_TEXTURED,
 };
-pub use chrome::PADDING as SEGMENT_PADDING;
 pub use text::{draw_in_box, measure, Align};
 pub use widget::{
-    center_panel, draw_footer_divider, draw_menu, draw_page_frame, draw_panel_frame, draw_panel_title,
-    draw_scrollbar, draw_toasts, draw_widgets, draw_widgets_in, Toast,
+    center_panel, draw_footer_divider, draw_menu, draw_page_frame, draw_panel_frame,
+    draw_panel_title, draw_scrollbar, draw_toasts, draw_widgets, draw_widgets_in, Toast,
 };
 
 use tuz_font::atlas::{Atlas, BYTES_PER_PIXEL};

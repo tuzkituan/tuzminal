@@ -452,7 +452,6 @@ impl FontSystem {
                 found = Some((info.id, family));
                 break;
             }
-
         }
 
         let (id, family) = found?;

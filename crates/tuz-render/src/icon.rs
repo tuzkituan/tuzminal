@@ -76,10 +76,7 @@ pub fn entry(out: &mut Vec<Instance>, kind: EntryKind, rect: Rect, color: [f32; 
         // An upward chevron: the same shape as "go up" everywhere else.
         EntryKind::Parent => {
             let arm = side * 0.35;
-            for turn in [
-                -std::f32::consts::FRAC_PI_4,
-                std::f32::consts::FRAC_PI_4,
-            ] {
+            for turn in [-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_4] {
                 out.push(Instance::rotated(
                     cx - arm / 2.0,
                     cy - stroke / 2.0,
@@ -106,7 +103,13 @@ pub fn entry(out: &mut Vec<Instance>, kind: EntryKind, rect: Rect, color: [f32; 
             let fold = w * 0.34;
             let left = cx - w / 2.0;
             out.push(Instance::solid(left, y, w - fold, side, color));
-            out.push(Instance::solid(left + w - fold, y + fold, fold, side - fold, color));
+            out.push(Instance::solid(
+                left + w - fold,
+                y + fold,
+                fold,
+                side - fold,
+                color,
+            ));
         }
 
         // A page with a chevron over it: a link points somewhere else.
@@ -114,10 +117,7 @@ pub fn entry(out: &mut Vec<Instance>, kind: EntryKind, rect: Rect, color: [f32; 
             let w = side * 0.78;
             out.push(Instance::solid(cx - w / 2.0, y, w, side, color));
             let arm = side * 0.3;
-            for turn in [
-                std::f32::consts::FRAC_PI_4,
-                -std::f32::consts::FRAC_PI_4,
-            ] {
+            for turn in [std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4] {
                 out.push(Instance::rotated(
                     cx - arm / 2.0,
                     cy - stroke / 2.0,
@@ -167,7 +167,14 @@ pub fn draw(
         ChromeButton::AppMenu => {
             for i in 0..3 {
                 let gap = (side - stroke) / 2.0;
-                hbar(out, x, y + stroke / 2.0 + i as f32 * gap, side, stroke, color);
+                hbar(
+                    out,
+                    x,
+                    y + stroke / 2.0 + i as f32 * gap,
+                    side,
+                    stroke,
+                    color,
+                );
             }
         }
 
@@ -183,10 +190,7 @@ pub fn draw(
         ChromeButton::NewTabMenu => {
             let arm = side * 0.34;
             let apex_y = cy + arm / 2.0;
-            for turn in [
-                std::f32::consts::FRAC_PI_4,
-                -std::f32::consts::FRAC_PI_4,
-            ] {
+            for turn in [std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4] {
                 out.push(Instance::rotated(
                     cx - arm / 2.0,
                     apex_y - stroke / 2.0,
@@ -209,7 +213,14 @@ pub fn draw(
             // The top of the hook, then down its right side, then back to the centre.
             hbar(out, left, y + stroke / 2.0, right - left, stroke, color);
             vbar(out, right - stroke / 2.0, y, hook_bottom - y, stroke, color);
-            hbar(out, cx, hook_bottom - stroke / 2.0, right - cx, stroke, color);
+            hbar(
+                out,
+                cx,
+                hook_bottom - stroke / 2.0,
+                right - cx,
+                stroke,
+                color,
+            );
 
             // The stem, and the dot beneath it with a gap so the two stay distinct.
             vbar(out, cx, hook_bottom, side * 0.22, stroke, color);
@@ -233,10 +244,7 @@ pub fn draw(
         // the cross reaches the corners rather than stopping short of them.
         ChromeButton::Close => {
             let diagonal = side * std::f32::consts::SQRT_2;
-            for turn in [
-                std::f32::consts::FRAC_PI_4,
-                -std::f32::consts::FRAC_PI_4,
-            ] {
+            for turn in [std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4] {
                 out.push(Instance::rotated(
                     cx - diagonal / 2.0,
                     cy - stroke / 2.0,

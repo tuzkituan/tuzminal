@@ -282,7 +282,10 @@ pub fn draw_widgets_in(
     // of five hundred files would rasterize five hundred rows of glyphs every frame
     // for the twenty on screen. The clip rect hides them; it does not make them free.
     let visible = ui.viewport();
-    let rows: Vec<&Placed> = rows.iter().filter(|p| intersects(p.rect, visible)).collect();
+    let rows: Vec<&Placed> = rows
+        .iter()
+        .filter(|p| intersects(p.rect, visible))
+        .collect();
 
     // Backgrounds for every row before any text, so no row's background can paint
     // over the label of the row above it.
@@ -1135,10 +1138,9 @@ mod tests {
             "the button box must be drawn at the rect that hit-testing uses"
         );
         assert!(
-            !out
-                .iter()
-                .any(|i| i.flags == 0 && i.size[0] == placed.value_rect.width as f32
-                    && placed.value_rect.width != placed.rect.width),
+            !out.iter().any(|i| i.flags == 0
+                && i.size[0] == placed.value_rect.width as f32
+                && placed.value_rect.width != placed.rect.width),
             "and never at the narrower value column"
         );
     }
@@ -1334,7 +1336,8 @@ mod tests {
         // own box instead, so nothing that wide should be painted in the ring color —
         // otherwise the field ends up inside a second border.
         assert!(
-            !out.iter().any(|i| i.color == ring && i.size[0] == row.width as f32),
+            !out.iter()
+                .any(|i| i.color == ring && i.size[0] == row.width as f32),
             "a focused field should not also get a ring around its whole row"
         );
         // The box itself is still there, and carries the focus color.
@@ -1458,5 +1461,4 @@ mod tests {
         };
         assert_ne!(fill(&hovered), fill(&held));
     }
-
 }

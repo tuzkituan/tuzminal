@@ -92,7 +92,11 @@ pub const DEFAULT_LABEL: &str = "Default";
 /// family picker gives an unknown family.
 pub fn options(configured: Option<&str>) -> Vec<String> {
     let mut out = vec![DEFAULT_LABEL.to_owned()];
-    out.extend(available().into_iter().map(|s| s.path.display().to_string()));
+    out.extend(
+        available()
+            .into_iter()
+            .map(|s| s.path.display().to_string()),
+    );
 
     if let Some(configured) = configured {
         if !out.iter().any(|o| o == configured) {

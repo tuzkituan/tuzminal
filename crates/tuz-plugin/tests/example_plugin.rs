@@ -64,7 +64,9 @@ fn the_example_produces_a_status_segment() {
 
     // `os.date("%H:%M")` — the shape matters, the value cannot.
     assert!(
-        segments.iter().any(|s| s.text.len() == 5 && s.text.contains(':')),
+        segments
+            .iter()
+            .any(|s| s.text.len() == 5 && s.text.contains(':')),
         "no clock segment in {segments:?}"
     );
 }
@@ -81,7 +83,9 @@ fn a_clickable_segment_reaches_the_plugin_that_published_it() {
     // buttons carry one, qualified by the host with the plugin's name.
     let owned = host.status_segments_with_owner();
     assert!(
-        owned.iter().any(|(s, owner)| s.text.contains(':') && owner.is_none()),
+        owned
+            .iter()
+            .any(|(s, owner)| s.text.contains(':') && owner.is_none()),
         "a clock should not be a button"
     );
 
