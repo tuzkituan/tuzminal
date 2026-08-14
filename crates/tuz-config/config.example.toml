@@ -48,8 +48,13 @@ synthetic_italic = true
 [window]
 padding = { x = 8, y = 8 }
 
-# Distribute leftover pixels evenly instead of leaving a gap on one edge.
-center_grid = true
+# Distribute the pixels left over after the last whole cell evenly between both
+# edges, instead of leaving them against the right and bottom.
+#
+# Off by default: a window is almost never an exact multiple of the cell size, and
+# the remainder changes as the window is resized — so centering means the padding
+# you see is not the padding you set, and it shifts every time you drag an edge.
+center_grid = false
 
 # Needs a compositor that supports transparency.
 opacity = 1.0

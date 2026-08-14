@@ -232,6 +232,14 @@ pub struct Window {
     pub padding: Padding,
     /// Grow padding so the grid is centered when the window size is not an exact
     /// multiple of the cell size, rather than leaving a gap on one edge.
+    ///
+    /// **Off by default, because it makes the padding a moving target.** A window is
+    /// almost never an exact multiple of the cell size, so centering adds half the
+    /// remainder to each edge — and that remainder changes with the window size. It grows
+    /// as the window widens and drops back the moment another column fits, so the padding
+    /// you see is not the padding you set, and it changes every time the window is
+    /// resized. Off, `padding` means exactly what it says and the leftover pixels sit
+    /// against the right and bottom edges where nothing is looking.
     pub center_grid: bool,
     /// Window opacity, `0.0..=1.0`. Requires a compositor with alpha support.
     pub opacity: f32,
@@ -277,7 +285,7 @@ impl Default for Window {
     fn default() -> Self {
         Self {
             padding: Padding::default(),
-            center_grid: true,
+            center_grid: false,
             opacity: 1.0,
             decorations: false,
             corner_radius: 6.0,
