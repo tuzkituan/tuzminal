@@ -14,7 +14,7 @@ theme = "tuz-dark"
 
 [font]
 family = "monospace"
-size = 15.0
+size = 13.0
 
 # Enable programming ligatures (=>, !=, ...). Requires a font that has them,
 # such as Fira Code, JetBrains Mono or Cascadia Code.
@@ -63,7 +63,7 @@ decorations = false
 # Radius of the window's rounded corners, in pixels. 0 squares them off. Needs
 # `decorations = false` and a compositor with transparency — the corners are rounded
 # by leaving those pixels transparent.
-corner_radius = 10.0
+corner_radius = 6.0
 
 # Initial size, in cells.
 columns = 100
@@ -79,6 +79,46 @@ split_divider_width = 1
 # Turning this off with a single tab open hides the buttons along with it, leaving
 # no visible controls — keyboard shortcuts still work.
 always_show_tab_bar = true
+
+
+[explorer]
+# The file browser down the left. Off by default: it takes width from every pane,
+# and a terminal that opens with a third of the window given to a file list is not
+# what most launches want. Toggle it with ctrl+shift+b.
+enabled = false
+
+# Width in *cells*, not pixels, so it scales with the font. Drag its right edge to
+# change it for the session; set it here to make that permanent.
+width = 28
+
+show_hidden = false
+sort_dirs_first = true
+
+
+[status_bar]
+# The strip along the bottom. Turning it off gives the row back to the panes.
+#
+# A plugin contributing segments still forces the strip to appear, so disabling this
+# does not silently break a plugin you installed.
+enabled = true
+
+# Working directory of the focused pane, and what it is running.
+#
+# The directory is read from the operating system, because no escape sequence reports
+# it and the VT parser does not track it — which means it only works on Linux. On
+# other platforms the path is simply absent and the rest of the bar is unaffected.
+show_directory = true
+
+# Cursor line and column, and the pane's grid size.
+show_cursor = true
+
+# How far the view is scrolled back. Only ever drawn while scrolled, so it is the
+# thing that explains why output has stopped moving.
+show_scroll = true
+
+# Pane and tab counts, theme name and font size. Off by default: the tab strip and
+# the splits already show most of this.
+show_session = false
 
 
 [cursor]

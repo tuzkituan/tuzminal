@@ -51,6 +51,16 @@ use tuz_layout::Rect;
 pub struct WidgetId(pub u32);
 
 /// A control, before layout.
+/// What a file-list row represents, which decides its icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// The `..` row.
+    Parent,
+    Directory,
+    File,
+    Symlink,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Widget {
     /// Static text. Never focusable and never hit-testable.
@@ -88,6 +98,25 @@ pub enum Widget {
         placeholder: String,
     },
     /// A number adjusted by a fixed step.
+    /// A reference row: what something does, and the keys that do it.
+    ///
+    /// Not interactive — a help page you can Tab through is a help page where Tab
+    /// moves a focus ring over thirty rows that do nothing.
+    Shortcut { label: String, keys: String },
+    /// A row in a list: icon, name, and a dimmed detail column.
+    ///
+    /// `Button` was the only row-shaped widget before this, and it centres its label
+    /// in a box — fine for "Save", wrong for a file name, and with nowhere to put a
+    /// size or an icon.
+    Entry {
+        id: WidgetId,
+        kind: EntryKind,
+        label: String,
+        detail: String,
+        /// The current row, as distinct from the focused one. Both can be true: focus
+        /// is where the keyboard is, selection is what an action would act on.
+        selected: bool,
+    },
     Stepper {
         id: WidgetId,
         label: String,
@@ -174,6 +203,29 @@ impl Widget {
         }
     }
 
+    pub fn shortcut(label: impl Into<String>, keys: impl Into<String>) -> Self {
+        Widget::Shortcut {
+            label: label.into(),
+            keys: keys.into(),
+        }
+    }
+
+    pub fn entry(
+        id: WidgetId,
+        kind: EntryKind,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Widget::Entry {
+            id,
+            kind,
+            label: label.into(),
+            detail: detail.into(),
+            selected,
+        }
+    }
+
     pub fn stepper(
         id: WidgetId,
         label: impl Into<String>,
@@ -196,11 +248,12 @@ impl Widget {
     /// The id, for everything except labels.
     pub fn id(&self) -> Option<WidgetId> {
         match self {
-            Widget::Label { .. } => None,
+            Widget::Label { .. } | Widget::Shortcut { .. } => None,
             Widget::Button { id, .. }
             | Widget::Toggle { id, .. }
             | Widget::Select { id, .. }
             | Widget::Text { id, .. }
+            | Widget::Entry { id, .. }
             | Widget::Stepper { id, .. } => Some(*id),
         }
     }
@@ -210,7 +263,7 @@ impl Widget {
     /// Labels never can; a disabled button never can. Everything else always can.
     pub fn is_interactive(&self) -> bool {
         match self {
-            Widget::Label { .. } => false,
+            Widget::Label { .. } | Widget::Shortcut { .. } => false,
             Widget::Button { enabled, .. } => *enabled,
             _ => true,
         }
@@ -219,7 +272,10 @@ impl Widget {
     /// Text shown on the right of the row, if the widget has a value.
     pub fn value_text(&self) -> Option<String> {
         match self {
-            Widget::Label { .. } | Widget::Button { .. } => None,
+            Widget::Label { .. } | Widget::Button { .. } | Widget::Shortcut { .. } => None,
+            // The detail column is drawn by the row itself, not as a value: it is
+            // dimmed supporting text, not something the row's controls change.
+            Widget::Entry { .. } => None,
             Widget::Toggle { on, .. } => Some(if *on {
                 "[x]".to_owned()
             } else {
@@ -345,6 +401,8 @@ pub struct Metrics {
     pub padding: u32,
     /// Width of the value column on the right.
     pub value_width: u32,
+    /// Width of one character, for sizing a button to its label.
+    pub char_width: u32,
 }
 
 impl Metrics {
@@ -357,7 +415,51 @@ impl Metrics {
             heading_space: cell_height,
             padding: cell_height,
             value_width: cell_height * 12,
+            // An estimate. Monospace cells are roughly half as wide as they are tall,
+            // and this constructor is only given the height. Prefer `from_cell` where
+            // the real width is known.
+            char_width: (cell_height / 2).max(1),
         }
+    }
+
+    /// Metrics from the real cell size, so a button sized to its label is exact.
+    pub fn from_cell(cell_width: u32, cell_height: u32) -> Self {
+        Self {
+            char_width: cell_width.max(1),
+            ..Self::from_cell_height(cell_height)
+        }
+    }
+}
+
+/// Whether a footer stacks its label above its value rather than beside it.
+///
+/// Only a lone editable prompt does. A row of buttons has no label to stack, and a
+/// settings row is wide enough to keep the two side by side.
+fn stacks_its_label(footer: &[Widget]) -> bool {
+    footer.len() == 1
+        && matches!(
+            footer[0],
+            Widget::Text { .. } | Widget::Select { .. } | Widget::Stepper { .. }
+        )
+}
+
+/// Height of a footer button. Half again a body row, so the page's actions carry
+/// more weight than the settings above them.
+fn footer_row_height(metrics: Metrics) -> u32 {
+    metrics.row_height + metrics.row_height / 2
+}
+
+/// The text a footer widget shows, for sizing it.
+fn footer_label(widget: &Widget) -> &str {
+    match widget {
+        Widget::Label { text, .. } => text,
+        Widget::Shortcut { label, .. } => label,
+        Widget::Button { label, .. }
+        | Widget::Toggle { label, .. }
+        | Widget::Select { label, .. }
+        | Widget::Text { label, .. }
+        | Widget::Entry { label, .. }
+        | Widget::Stepper { label, .. } => label,
     }
 }
 
@@ -375,6 +477,14 @@ pub struct Ui {
     /// How far the content is scrolled, in pixels. Always clamped so the last row
     /// can reach the bottom edge and no further.
     scroll: u32,
+    /// How many entries in `placed` belong to the scrolling body. The rest are the
+    /// pinned footer, which never scrolls and is excluded from the scroll maths.
+    body_count: usize,
+    /// The band the footer occupies, or a zero-height rect when there is no footer.
+    footer_area: Rect,
+    /// The scrolling viewport. Body rows outside it are laid out but not hit-testable,
+    /// because they are clipped away when drawn.
+    body_area: Rect,
 }
 
 impl Ui {
@@ -391,7 +501,52 @@ impl Ui {
     }
 
     pub fn layout_with(&mut self, widgets: &[Widget], area: Rect, metrics: Metrics) {
+        self.layout_split_with(widgets, &[], area, metrics)
+    }
+
+    /// Lay out a scrolling body with a row of `footer` widgets pinned to the bottom.
+    ///
+    /// The footer is where actions live — save, revert, close. Leaving them at the end
+    /// of the scrolling list meant they were off screen exactly when you wanted them:
+    /// you would change a setting near the top and then have to scroll to the bottom
+    /// to save it. Pinned, they are always reachable, and the body scrolls behind.
+    ///
+    /// Footer widgets are laid out side by side across the width rather than stacked,
+    /// because a handful of buttons in a row is what a footer is.
+    pub fn layout_split(
+        &mut self,
+        body: &[Widget],
+        footer: &[Widget],
+        area: Rect,
+        cell_height: u32,
+    ) {
+        self.layout_split_with(body, footer, area, Metrics::from_cell_height(cell_height));
+    }
+
+    pub fn layout_split_with(
+        &mut self,
+        widgets: &[Widget],
+        footer: &[Widget],
+        area: Rect,
+        metrics: Metrics,
+    ) {
         self.placed.clear();
+
+        // The footer claims its band first, so the body never lays out underneath it.
+        let footer_height = if footer.is_empty() {
+            0
+        } else {
+            // The footer row is taller than a body row: these are the page's primary
+            // actions and a button the same height as a checkbox does not read as one.
+            // A lone prompt is taller still, because its label sits above the field
+            // rather than beside it — see `place_footer`.
+            let rows = if stacks_its_label(footer) { 2 } else { 1 };
+            footer_row_height(metrics) * rows + metrics.padding * 2
+        };
+        let body_height = area.height.saturating_sub(footer_height);
+        let area = Rect::new(area.x, area.y, area.width, body_height);
+        self.footer_area = Rect::new(area.x, area.bottom(), area.width, footer_height);
+        self.body_area = area;
 
         let left = area.x + metrics.padding as i32;
         let width = area.width.saturating_sub(metrics.padding * 2);
@@ -406,9 +561,11 @@ impl Ui {
             }
 
             let rect = Rect::new(left, y, width, metrics.row_height);
-            // The value column is right-aligned within the row, and never wider
-            // than the row itself on a narrow panel.
-            let value_width = metrics.value_width.min(width);
+            // The value column is right-aligned within the row, and never wide enough
+            // to reach the label. Capping it at the row width was not enough: on a
+            // narrow panel `value_width` exceeds the row, the cap hands it everything,
+            // and the label and the value are drawn one on top of the other.
+            let value_width = metrics.value_width.min(width * 2 / 3);
             let value_rect = Rect::new(
                 rect.right() - value_width as i32,
                 y,
@@ -439,6 +596,10 @@ impl Ui {
             self.relayout_rows(area, metrics);
         }
 
+        // Everything placed so far scrolls; everything after this does not.
+        self.body_count = self.placed.len();
+        self.place_footer(footer, metrics);
+
         // Drop focus and hover if the widget they referred to is gone.
         if let Some(id) = self.focus {
             if self.index_of(id).is_none() {
@@ -455,6 +616,114 @@ impl Ui {
     /// Reposition already-placed rows for the current scroll offset.
     ///
     /// Cheaper than rebuilding the widget list, and used only to correct a clamp.
+    /// Lay the footer widgets out in a row across the pinned band.
+    ///
+    /// Each button is sized to its own label rather than stretched to an equal share
+    /// of the width. A button spanning a third of the window is a big target that
+    /// still reads as a mistake — the label floats in the middle of an expanse of
+    /// box, and nothing about the shape says where the edges are. Sized to their
+    /// text and pushed to the right, they look like the buttons they are.
+    fn place_footer(&mut self, footer: &[Widget], metrics: Metrics) {
+        if footer.is_empty() {
+            return;
+        }
+        let band = self.footer_area;
+        let gap = metrics.row_gap * 4;
+
+        let width_of = |widget: &Widget| {
+            let chars = footer_label(widget).chars().count() as u32;
+            // Padding either side of the label, so the text is not against the border.
+            chars * metrics.char_width + metrics.char_width * 6
+        };
+
+        let total: u32 = footer.iter().map(width_of).sum::<u32>()
+            + gap * footer.len().saturating_sub(1) as u32;
+
+        // Right-aligned, and clamped to the band so a narrow window pushes the row to
+        // the left edge rather than off it.
+        let available = band.width.saturating_sub(metrics.padding * 2);
+        let start = if total >= available {
+            band.x + metrics.padding as i32
+        } else {
+            band.right() - metrics.padding as i32 - total as i32
+        };
+
+        // A lone footer widget is a prompt, not a button row: a rename field sized to
+        // the words "Rename to" would leave a handful of characters for the name.
+        // Give it the whole band.
+        let sole = footer.len() == 1;
+        let stacked = stacks_its_label(footer);
+
+        let mut x = if sole { band.x + metrics.padding as i32 } else { start };
+        let y = band.y + metrics.padding as i32;
+        for widget in footer {
+            let width = if sole { available } else { width_of(widget) };
+            let row = footer_row_height(metrics);
+            let rect = Rect::new(x, y, width, if stacked { row * 2 } else { row });
+
+            // Buttons draw their box at `rect`, so for them the two agree. Anything
+            // with a value — a text field especially — needs a rect of its own, or the
+            // label and the value are drawn one on top of the other.
+            let value_rect = if matches!(widget, Widget::Button { .. } | Widget::Label { .. }) {
+                rect
+            } else if stacked {
+                // The lower row, full width. A prompt in a narrow column has no room
+                // to put a label beside a filename, so it goes above it instead.
+                Rect::new(rect.x, rect.y + row as i32, width, row)
+            } else {
+                // Measured off the label that is actually there rather than a fixed
+                // column width, because the label is the only thing competing with it.
+                let label = footer_label(widget).chars().count() as u32;
+                let reserved = label * metrics.char_width + metrics.char_width * 2;
+                let value_width = width
+                    .saturating_sub(reserved)
+                    .max(metrics.char_width * 4)
+                    .min(width);
+                Rect::new(
+                    rect.right() - value_width as i32,
+                    y,
+                    value_width,
+                    rect.height,
+                )
+            };
+
+            self.placed.push(Placed {
+                widget: widget.clone(),
+                rect,
+                value_rect,
+            });
+            x += (width + gap) as i32;
+        }
+    }
+
+    /// The scrolling viewport rows are clipped to, plus the pinned footer.
+    ///
+    /// Drawing uses this to skip rows that are laid out but off screen. It spans both
+    /// bands because the footer sits below the body and its rows must never be culled.
+    pub fn viewport(&self) -> Rect {
+        let body = self.body_area;
+        let footer = self.footer_area;
+        if footer.height == 0 {
+            return body;
+        }
+        Rect::new(
+            body.x,
+            body.y,
+            body.width.max(footer.width),
+            body.height + footer.height,
+        )
+    }
+
+    /// The pinned footer band, for drawing a divider above it.
+    pub fn footer_area(&self) -> Rect {
+        self.footer_area
+    }
+
+    /// Rows that scroll. The footer is excluded.
+    pub fn body(&self) -> &[Placed] {
+        &self.placed[..self.body_count.min(self.placed.len())]
+    }
+
     fn relayout_rows(&mut self, area: Rect, metrics: Metrics) {
         let mut y = area.y + metrics.padding as i32 - self.scroll as i32;
         let mut first = true;
@@ -499,6 +768,15 @@ impl Ui {
         moved
     }
 
+    /// Scroll the focused widget into view, using the area of the last layout.
+    ///
+    /// The rect-taking form exists for callers that clip to something other than the
+    /// body; a list just wants its cursor on screen.
+    pub fn scroll_to_focus_in_body(&mut self) -> bool {
+        let area = self.body_area;
+        self.scroll_to_focus(area)
+    }
+
     /// Scroll so the focused widget is fully visible.
     ///
     /// Called after focus moves: tabbing to a control below the fold would otherwise
@@ -507,6 +785,16 @@ impl Ui {
         let Some(id) = self.focus else {
             return false;
         };
+        // A focused footer button is pinned below the body and so always visible;
+        // scrolling toward it would chase a target that never enters the viewport.
+        if self
+            .placed
+            .iter()
+            .position(|p| p.widget.id() == Some(id))
+            .is_some_and(|i| i >= self.body_count)
+        {
+            return false;
+        }
         let Some(rect) = self.rect_of(id) else {
             return false;
         };
@@ -538,10 +826,29 @@ impl Ui {
 
     /// The interactive widget at a point, if any.
     pub fn hit(&self, x: i32, y: i32) -> Option<WidgetId> {
+        self.hit_index(x, y).and_then(|i| self.placed[i].widget.id())
+    }
+
+    /// Index of the interactive row under a point.
+    ///
+    /// Body rows are only hit inside the scrolling viewport. Layout places every row
+    /// at its natural offset without clamping, so rows past the fold have rects that
+    /// extend down into the pinned footer — and since they come first in `placed`,
+    /// one of them would answer for a click meant for a footer button. They are
+    /// clipped away when drawn, so treating them as absent here is what makes
+    /// hit-testing agree with what is on screen.
+    fn hit_index(&self, x: i32, y: i32) -> Option<usize> {
         self.placed
             .iter()
-            .find(|p| p.is_interactive() && p.rect.contains(x, y))
-            .and_then(|p| p.widget.id())
+            .enumerate()
+            .find(|(i, p)| {
+                p.is_interactive()
+                    && p.rect.contains(x, y)
+                    // A clipped-away body row is skipped rather than ending the
+                    // search: the footer button underneath it is the real target.
+                    && (*i >= self.body_count || self.body_area.contains(x, y))
+            })
+            .map(|(i, _)| i)
     }
 
     /// Update the hovered widget, reporting whether it changed.
@@ -568,10 +875,7 @@ impl Ui {
     /// Clicking also moves focus there, so the keyboard and mouse never disagree
     /// about which widget is current.
     pub fn click(&mut self, x: i32, y: i32) -> Option<UiAction> {
-        let index = self
-            .placed
-            .iter()
-            .position(|p| p.is_interactive() && p.rect.contains(x, y))?;
+        let index = self.hit_index(x, y)?;
 
         let placed = &self.placed[index];
         let id = placed.widget.id()?;
@@ -579,7 +883,15 @@ impl Ui {
 
         match &placed.widget {
             Widget::Button { .. } => Some(UiAction::Pressed(id)),
+            // A list row behaves like a button: clicking it is activating it. What
+            // that means — descend, or select — is the caller's business.
+            Widget::Entry { .. } => Some(UiAction::Pressed(id)),
             Widget::Toggle { on, .. } => Some(UiAction::Toggled(id, !on)),
+
+            // Never reached: `hit_index` filters on `is_interactive`, which a
+            // shortcut row is not. Matched explicitly so a future variant cannot slip
+            // through as a silent no-op.
+            Widget::Shortcut { .. } => None,
 
             // For a value widget, which half of the value column was clicked
             // decides the direction. Clicking the label side does nothing but focus,
@@ -655,7 +967,9 @@ impl Ui {
                     return KeyResponse::Consumed;
                 };
                 match &self.placed[index].widget {
-                    Widget::Button { id, .. } => KeyResponse::Action(UiAction::Pressed(*id)),
+                    Widget::Button { id, .. } | Widget::Entry { id, .. } => {
+                        KeyResponse::Action(UiAction::Pressed(*id))
+                    }
                     Widget::Toggle { id, on, .. } => {
                         KeyResponse::Action(UiAction::Toggled(*id, !on))
                     }
@@ -669,7 +983,9 @@ impl Ui {
                     }
                     // Enter in a text field commits nothing extra: edits are already
                     // reported as they are typed.
-                    Widget::Text { .. } | Widget::Label { .. } => KeyResponse::Consumed,
+                    Widget::Text { .. } | Widget::Label { .. } | Widget::Shortcut { .. } => {
+                        KeyResponse::Consumed
+                    }
                 }
             }
         }
@@ -1777,5 +2093,225 @@ mod text_input_tests {
         assert_eq!(ui.click(rect.center_x(), rect.center_y()), None);
         assert_eq!(ui.focused(), Some(WidgetId(1)));
         assert_eq!(value_of(&ui), "abc");
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    fn body_widgets() -> Vec<Widget> {
+        (0..40)
+            .map(|i| Widget::toggle(WidgetId(i + 1), format!("row {i}"), false))
+            .collect()
+    }
+
+    fn footer_widgets() -> Vec<Widget> {
+        vec![
+            Widget::button(WidgetId(90), "Save to config.toml"),
+            Widget::button(WidgetId(91), "Revert"),
+            Widget::button(WidgetId(92), "Close"),
+        ]
+    }
+
+    /// A body long enough to need scrolling, plus a three-button footer.
+    fn split_ui(area: Rect) -> Ui {
+        let mut ui = Ui::new();
+        ui.layout_split(&body_widgets(), &footer_widgets(), area, 20);
+        ui
+    }
+
+    fn footer_rects(ui: &Ui) -> Vec<Rect> {
+        ui.placed()[ui.body().len()..].iter().map(|p| p.rect).collect()
+    }
+
+    #[test]
+    fn the_footer_stays_put_while_the_body_scrolls() {
+        let area = Rect::new(0, 0, 800, 400);
+        let mut ui = split_ui(area);
+
+        let before = footer_rects(&ui);
+        let first_row = ui.body()[0].rect;
+
+        assert!(ui.scroll_by(120), "the body should be scrollable");
+        // Re-lay out at the new offset, the way the next frame would.
+        ui.layout_split(&body_widgets(), &footer_widgets(), area, 20);
+
+        assert_eq!(
+            before,
+            footer_rects(&ui),
+            "the footer is pinned; scrolling the body must not move it"
+        );
+        assert!(
+            ui.body()[0].rect.y < first_row.y,
+            "the body should have moved up"
+        );
+    }
+
+    /// A label and its value must never be drawn on top of each other, at any width.
+    ///
+    /// This is the bug twice over: first because footer rows shared one rect, then
+    /// because a value column wider than a narrow row was capped to the whole row.
+    #[test]
+    fn a_value_column_never_covers_its_label_at_any_width() {
+        for width in [120u32, 200, 320, 480, 800, 1600] {
+            let mut ui = Ui::new();
+            ui.layout_split(
+                &[Widget::toggle(WidgetId(1), "Some setting", false)],
+                &[Widget::text(WidgetId(2), "Rename to", "Cargo.toml", "")],
+                Rect::new(0, 0, width, 400),
+                20,
+            );
+
+            for row in ui.placed() {
+                // Separated one way or the other: beside the label, or below it.
+                // What must never happen is the value starting where the label does,
+                // which is the two strings drawn on top of each other.
+                assert!(
+                    row.value_rect.x > row.rect.x || row.value_rect.y > row.rect.y,
+                    "at width {width}, {:?} draws its value over its label",
+                    row.widget
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_footer_field_spans_the_band_and_keeps_its_value_column_separate() {
+        let area = Rect::new(0, 0, 800, 400);
+        let mut ui = Ui::new();
+        ui.layout_split(
+            &body_widgets(),
+            &[Widget::text(WidgetId(1), "Rename to", "BUILD-LOG.md", "")],
+            area,
+            20,
+        );
+
+        let field = &ui.placed()[ui.body().len()];
+        // Sized to the words "Rename to" it would leave a handful of characters for
+        // the name, which is not a field anyone can type a filename into.
+        assert!(
+            field.rect.width > area.width / 2,
+            "a prompt should take the band, got {}",
+            field.rect.width
+        );
+        // A prompt in a narrow column stacks: the label takes the upper row and the
+        // field the lower one, so the name gets the full width to be typed into.
+        assert!(
+            field.value_rect.y > field.rect.y,
+            "the label should sit above the field, not beside it"
+        );
+        assert_eq!(field.value_rect.width, field.rect.width);
+        assert!(
+            field.value_rect.bottom() <= field.rect.bottom(),
+            "the field must stay inside the row it was given"
+        );
+        // Room for both rows, or the label would be drawn into zero height.
+        assert!(field.rect.height >= field.value_rect.height * 2);
+    }
+
+    #[test]
+    fn a_row_of_footer_buttons_still_shares_one_rect_for_box_and_hit_area() {
+        let ui = split_ui(Rect::new(0, 0, 800, 400));
+        for row in &ui.placed()[ui.body().len()..] {
+            // Buttons draw their box at `rect`, so the two agreeing is what keeps the
+            // pressable area and the visible box identical.
+            assert_eq!(row.rect, row.value_rect);
+        }
+    }
+
+    #[test]
+    fn footer_buttons_are_sized_to_their_labels_not_stretched() {
+        let footer = footer_rects(&split_ui(Rect::new(0, 0, 800, 400)));
+        assert_eq!(footer.len(), 3);
+
+        // Equal thirds of the width would be a huge target that still reads wrong: the
+        // label floats in an expanse of box with nothing marking the edges.
+        assert!(
+            footer[0].width > footer[1].width,
+            "'Save to config.toml' is a longer label than 'Revert'"
+        );
+        assert!(footer[1].width > footer[2].width);
+
+        // And they must not overlap, or the leftmost swallows its neighbours' clicks.
+        assert!(footer[0].right() <= footer[1].x);
+        assert!(footer[1].right() <= footer[2].x);
+    }
+
+    #[test]
+    fn a_footer_button_is_clicked_by_the_rect_it_is_drawn_at() {
+        let mut ui = split_ui(Rect::new(0, 0, 800, 400));
+        let rect = ui.placed()[ui.body().len()].rect;
+
+        // Every corner of the box must register, not just the middle: the drawn area
+        // and the pressable area used to be different rectangles.
+        for (x, y) in [
+            (rect.x + 1, rect.y + 1),
+            (rect.right() - 1, rect.y + 1),
+            (rect.x + 1, rect.bottom() - 1),
+            (rect.right() - 1, rect.bottom() - 1),
+        ] {
+            assert!(
+                ui.hit(x, y).is_some(),
+                "({x}, {y}) is inside the drawn button but does not hit it"
+            );
+        }
+        assert!(matches!(
+            ui.click(rect.x + 2, rect.y + 2),
+            Some(UiAction::Pressed(_))
+        ));
+    }
+
+    #[test]
+    fn the_pinned_band_comes_out_of_the_scroll_viewport() {
+        let area = Rect::new(0, 0, 800, 400);
+        let with_footer = split_ui(area);
+
+        let mut without = Ui::new();
+        without.layout_split(&body_widgets(), &[], area, 20);
+
+        // If the footer did not reserve its band the body would lay out underneath it,
+        // and the last rows would be permanently hidden behind the buttons.
+        assert!(
+            with_footer.max_scroll() > without.max_scroll(),
+            "reserving the band must shrink the scrolling viewport"
+        );
+        assert_eq!(without.footer_area().height, 0);
+        assert!(with_footer.footer_area().height > 0);
+    }
+
+    #[test]
+    fn footer_buttons_keep_clear_of_the_windows_bottom_edge() {
+        let ui = split_ui(Rect::new(0, 0, 800, 400));
+        let band = ui.footer_area();
+
+        // The window's resize handle is a band a handful of pixels deep along each
+        // edge, and it takes clicks before anything drawn there. A button flush with
+        // the bottom would lose its lowest rows to it, so the footer keeps its padding
+        // below the buttons rather than centring them in the band.
+        for rect in footer_rects(&ui) {
+            assert!(
+                band.bottom() - rect.bottom() >= 8,
+                "button {rect:?} comes too close to the bottom of {band:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn focusing_a_footer_button_does_not_chase_it_with_the_scroll() {
+        let area = Rect::new(0, 0, 800, 400);
+        let mut ui = split_ui(area);
+        let scroll_area = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height - ui.footer_area().height,
+        );
+
+        ui.focus(WidgetId(92));
+        // The footer sits below the scroll area and is always visible, so scrolling
+        // toward it would chase a target that can never enter the viewport.
+        assert!(!ui.scroll_to_focus(scroll_area));
+        assert_eq!(ui.scroll(), 0);
     }
 }

@@ -12,7 +12,7 @@ use crate::text::{self, Align};
 use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
 use tuz_layout::Rect;
-use tuz_ui::{Placed, Ui, Widget, WidgetId};
+use tuz_ui::{EntryKind, Placed, Ui, Widget, WidgetId};
 
 /// Inset for text inside a row.
 const PADDING: f32 = 8.0;
@@ -73,6 +73,130 @@ pub fn draw_panel_frame(
 /// Draw a title bar across the top of the panel.
 ///
 /// Returns the rect below it, which is where widgets go.
+/// Fill a settings page and return the area left for content.
+///
+/// Unlike [`draw_panel_frame`] there is no scrim and no border: a page fills its tab,
+/// so there is nothing behind it to dim and no edge to outline — the tab strip
+/// already says where it begins.
+/// `radius` rounds the bottom corners, for a page that runs to the bottom of a
+/// borderless window. A page fills its tab edge to edge, so unlike a terminal pane —
+/// whose grid is inset by the window padding — it paints the corner pixels itself and
+/// would square off the window's curve if it ignored them.
+pub fn draw_page_frame(
+    out: &mut Vec<Instance>,
+    page: Rect,
+    theme: &Theme,
+    colors: ColorSpace,
+    radius: f32,
+) {
+    out.push(Instance::rounded(
+        page.x as f32,
+        page.y as f32,
+        page.width as f32,
+        page.height as f32,
+        colors.convert(theme.background),
+        radius,
+        crate::instance::FLAG_ROUND_BOTTOM,
+    ));
+}
+
+/// Draw a dropdown: a bordered box, its rows, and the selected one highlighted.
+///
+/// Its own function rather than a `Ui`: a menu is one column of labels that closes as
+/// soon as you pick something, and routing it through the general widget layout would
+/// bring scrolling, focus rings and a footer for a list of four shells.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_menu(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    rect: Rect,
+    rows: &[(Rect, &str)],
+    selected: usize,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    // Border then interior, the same two-quad outline the panel frame uses.
+    out.push(Instance::solid(
+        rect.x as f32,
+        rect.y as f32,
+        rect.width as f32,
+        rect.height as f32,
+        colors.convert_opaque(theme.split_divider()),
+    ));
+    let inner = rect.inset(BORDER as u32, BORDER as u32);
+    out.push(Instance::solid(
+        inner.x as f32,
+        inner.y as f32,
+        inner.width as f32,
+        inner.height as f32,
+        colors.convert_opaque(theme.background_focused()),
+    ));
+
+    for (index, (row, label)) in rows.iter().enumerate() {
+        if index == selected {
+            out.push(Instance::solid(
+                row.x as f32,
+                row.y as f32,
+                row.width as f32,
+                row.height as f32,
+                colors.convert_opaque(theme.cursor()),
+            ));
+        }
+        text::draw_in_box(
+            out,
+            fonts,
+            label,
+            *row,
+            PADDING,
+            Align::Left,
+            if index == selected {
+                theme.background
+            } else {
+                theme.foreground
+            },
+            colors,
+            Style::Regular,
+        );
+    }
+}
+
+/// Draw the rule separating a pinned footer from the content above it.
+pub fn draw_footer_divider(
+    out: &mut Vec<Instance>,
+    footer: Rect,
+    theme: &Theme,
+    colors: ColorSpace,
+    radius: f32,
+) {
+    if footer.height == 0 {
+        return;
+    }
+    // The footer sits on the page's bottom edge and is drawn over it, so it inherits
+    // the same rounding — otherwise it paints the curve the page just made square
+    // again.
+    out.push(Instance::rounded(
+        footer.x as f32,
+        footer.y as f32,
+        footer.width as f32,
+        footer.height as f32,
+        colors.convert_opaque(theme.background_focused()),
+        radius,
+        crate::instance::FLAG_ROUND_BOTTOM,
+    ));
+    out.push(Instance::solid(
+        footer.x as f32,
+        footer.y as f32,
+        footer.width as f32,
+        BORDER,
+        colors.convert_opaque(theme.split_divider()),
+    ));
+}
+
+/// `inset` is how far the title is indented, and must be the same value the rows
+/// below are laid out with — `Metrics::padding`. Deriving it here from the font
+/// instead is off by whatever `line_height` is set to, and a heading indented
+/// differently from the content it heads reads as a misalignment rather than a choice.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_panel_title(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
@@ -80,6 +204,7 @@ pub fn draw_panel_title(
     title: &str,
     theme: &Theme,
     colors: ColorSpace,
+    inset: f32,
 ) -> Rect {
     let height = fonts.metrics().height + 12;
     let bar = Rect::new(panel.x, panel.y, panel.width, height.min(panel.height));
@@ -105,7 +230,7 @@ pub fn draw_panel_title(
         fonts,
         title,
         bar,
-        PADDING * 2.0,
+        inset,
         Align::Left,
         theme.foreground,
         colors,
@@ -132,16 +257,46 @@ pub fn draw_widgets(
     theme: &Theme,
     colors: ColorSpace,
 ) {
+    draw_widgets_in(out, fonts, ui.placed(), ui, theme, colors);
+}
+
+/// Draw a subset of a `Ui`'s rows.
+///
+/// Exists so a page can draw its scrolling body and its pinned footer as separate
+/// ranges: the body is clipped to the scroll area, the footer must not be, and one
+/// call covering both would have to be clipped as a unit.
+pub fn draw_widgets_in(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    rows: &[Placed],
+    ui: &Ui,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
     let focus = ui.focused();
     let hover = ui.hovered();
 
-    for placed in ui.placed() {
+    // Rows outside the viewport are skipped rather than drawn and scissored away.
+    // Layout places every row at its natural offset with no clamping, so a directory
+    // of five hundred files would rasterize five hundred rows of glyphs every frame
+    // for the twenty on screen. The clip rect hides them; it does not make them free.
+    let visible = ui.viewport();
+    let rows: Vec<&Placed> = rows.iter().filter(|p| intersects(p.rect, visible)).collect();
+
+    // Backgrounds for every row before any text, so no row's background can paint
+    // over the label of the row above it.
+    for placed in &rows {
         draw_row_background(out, placed, focus, hover, theme, colors);
     }
-    for placed in ui.placed() {
+    for placed in &rows {
         let focused = placed.widget.id().is_some() && placed.widget.id() == focus;
         draw_row_text(out, fonts, placed, focused, theme, colors);
     }
+}
+
+/// Whether two rects share any area. A row exactly level with the edge counts as out.
+fn intersects(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
 fn draw_row_background(
@@ -156,9 +311,27 @@ fn draw_row_background(
     let focused = id.is_some() && id == focus;
     let hovered = id.is_some() && id == hover;
 
+    // The selected row of a list, filled before anything else so the ring and the
+    // hover highlight both sit on top of it. This is what makes an arrow keypress
+    // visible: without it the selection moves and the list looks unchanged.
+    if let Widget::Entry { selected: true, .. } = placed.widget {
+        out.push(Instance::solid(
+            placed.rect.x as f32,
+            placed.rect.y as f32,
+            placed.rect.width as f32,
+            placed.rect.height as f32,
+            colors.convert_opaque(theme.background_focused()),
+        ));
+    }
+
     // A focus ring rather than a fill: a filled focus indicator competes with the
     // hover highlight and with a button's own border.
-    if focused {
+    //
+    // Skipped for a text field, which already draws a box around itself — a ring
+    // around that box is two nested borders, and once the label stacks above the
+    // field the outer one encircles the label too, which reads as a mistake. The
+    // field's own border carries the focus color instead.
+    if focused && !matches!(placed.widget, Widget::Text { .. }) {
         let ring = colors.convert_opaque(theme.cursor());
         let r = placed.rect;
         out.push(Instance::solid(
@@ -210,7 +383,13 @@ fn draw_row_background(
             r.y as f32,
             r.width as f32,
             r.height as f32,
-            colors.convert_opaque(theme.split_divider()),
+            // The border doubles as the focus indicator, which is why the ring above
+            // skips this widget.
+            colors.convert_opaque(if focused {
+                theme.cursor()
+            } else {
+                theme.split_divider()
+            }),
         ));
         let inner = r.inset(BORDER as u32, BORDER as u32);
         out.push(Instance::solid(
@@ -250,8 +429,14 @@ fn draw_row_background(
 
 /// Buttons occupy the value column rather than the whole row, so a row of them does
 /// not look like a row of full-width bars.
+/// A button's box is its whole row.
+///
+/// It used to be `value_rect`, the narrow right-hand column, while hit-testing used
+/// the full row — so the visible box and the clickable area were different rectangles
+/// and neither one explained the other. They are the same rect now, which is the only
+/// arrangement where what you see is what you can press.
 fn button_rect(placed: &Placed) -> Rect {
-    placed.value_rect
+    placed.rect
 }
 
 fn draw_row_text(
@@ -287,6 +472,100 @@ fn draw_row_text(
             );
         }
 
+        // What it does on the left, the keys on the right. The keys are dimmed
+        // because you scan the descriptions and only then read across.
+        Widget::Shortcut { label, keys } => {
+            text::draw_in_box(
+                out,
+                fonts,
+                label,
+                placed.rect,
+                PADDING,
+                Align::Left,
+                theme.foreground,
+                colors,
+                Style::Regular,
+            );
+            text::draw_in_box(
+                out,
+                fonts,
+                keys,
+                placed.rect,
+                PADDING,
+                Align::Right,
+                theme.bright.black,
+                colors,
+                Style::Regular,
+            );
+        }
+
+        // An explicit arm, not because the wildcard below would fail to compile —
+        // it would not, and that is the danger. It ends in `_ => ""`, so a new
+        // variant renders as a blank row with no error anywhere.
+        Widget::Entry {
+            kind,
+            label,
+            detail,
+            ..
+        } => {
+            let icon_width = placed.rect.height as f32;
+            let icon = Rect::new(
+                placed.rect.x,
+                placed.rect.y,
+                icon_width as u32,
+                placed.rect.height,
+            );
+            crate::icon::entry(
+                out,
+                *kind,
+                icon,
+                colors.convert_opaque(match kind {
+                    EntryKind::Directory | EntryKind::Parent => theme.cursor(),
+                    EntryKind::Symlink => theme.normal.cyan,
+                    EntryKind::File => theme.bright.black,
+                }),
+            );
+
+            // The detail column is measured off the right, and the name gets what is
+            // left — a long file name should crowd the size, not overrun it.
+            let detail_width = text::measure(detail, fonts.metrics().width as f32);
+            let name = Rect::new(
+                icon.right(),
+                placed.rect.y,
+                placed
+                    .rect
+                    .width
+                    .saturating_sub(icon.width)
+                    .saturating_sub(detail_width as u32 + PADDING as u32),
+                placed.rect.height,
+            );
+            text::draw_in_box(
+                out,
+                fonts,
+                label,
+                name,
+                PADDING / 2.0,
+                Align::Left,
+                theme.foreground,
+                colors,
+                Style::Regular,
+            );
+
+            if !detail.is_empty() {
+                text::draw_in_box(
+                    out,
+                    fonts,
+                    detail,
+                    placed.rect,
+                    PADDING,
+                    Align::Right,
+                    theme.bright.black,
+                    colors,
+                    Style::Regular,
+                );
+            }
+        }
+
         Widget::Button { label, enabled, .. } => {
             text::draw_in_box(
                 out,
@@ -314,11 +593,24 @@ fn draw_row_text(
             placeholder,
             ..
         } => {
+            // The label goes wherever the value is not. Stacked, that is the band
+            // above the field; side by side, it is the whole row with the value
+            // right-aligned over it. One rule, both layouts.
+            let label_rect = if placed.value_rect.y > placed.rect.y {
+                Rect::new(
+                    placed.rect.x,
+                    placed.rect.y,
+                    placed.rect.width,
+                    (placed.value_rect.y - placed.rect.y) as u32,
+                )
+            } else {
+                placed.rect
+            };
             text::draw_in_box(
                 out,
                 fonts,
                 label,
-                placed.rect,
+                label_rect,
                 PADDING,
                 Align::Left,
                 theme.foreground,
@@ -669,6 +961,7 @@ mod tests {
             "Settings",
             &Theme::builtin_default(),
             colors(),
+            20.0,
         );
 
         assert!(body.y > panel.y, "the body must start below the title");
@@ -687,6 +980,7 @@ mod tests {
             "Settings",
             &Theme::builtin_default(),
             colors(),
+            20.0,
         );
         assert_eq!(body.height, 0);
     }
@@ -797,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_button_is_drawn_as_a_box_inside_the_value_column() {
+    fn a_buttons_box_is_exactly_the_rect_it_is_clicked_by() {
         // Full-width buttons would look like bars rather than controls.
         let mut fonts = fonts();
         let ui = sample_ui();
@@ -816,14 +1110,21 @@ mod tests {
             colors(),
         );
 
+        // `Ui::click` hit-tests against `rect`, so the box has to be drawn at `rect`
+        // too. When these were different rectangles the visible button and the
+        // pressable area did not line up, and part of what looked like a button
+        // simply did not respond.
         assert!(
             out.iter()
-                .any(|i| i.flags == 0 && i.size[0] == placed.value_rect.width as f32),
-            "the button box should match the value column width"
+                .any(|i| i.flags == 0 && i.size[0] == placed.rect.width as f32),
+            "the button box must be drawn at the rect that hit-testing uses"
         );
         assert!(
-            placed.value_rect.width < placed.rect.width,
-            "and be narrower than the row"
+            !out
+                .iter()
+                .any(|i| i.flags == 0 && i.size[0] == placed.value_rect.width as f32
+                    && placed.value_rect.width != placed.rect.width),
+            "and never at the narrower value column"
         );
     }
 
@@ -996,4 +1297,91 @@ mod tests {
         let panel = center_panel(Rect::new(50, 20, 400, 200), 200, 100);
         assert_eq!(panel, Rect::new(150, 70, 200, 100));
     }
+    #[test]
+    fn a_focused_text_field_has_one_border_not_a_ring_around_a_box() {
+        let theme = Theme::builtin_default();
+        let mut fonts = fonts();
+        let mut ui = Ui::new();
+        let area = Rect::new(0, 0, 400, 200);
+        ui.layout(
+            &[Widget::text(WidgetId(1), "Rename to", "README.md", "")],
+            area,
+            20,
+        );
+        ui.focus(WidgetId(1));
+
+        let mut out = Vec::new();
+        draw_widgets(&mut out, &mut fonts, &ui, &theme, colors());
+
+        let row = ui.placed()[0].rect;
+        let ring = colors().convert_opaque(theme.cursor());
+        // The generic focus ring spans the row's full width. A text field draws its
+        // own box instead, so nothing that wide should be painted in the ring color —
+        // otherwise the field ends up inside a second border.
+        assert!(
+            !out.iter().any(|i| i.color == ring && i.size[0] == row.width as f32),
+            "a focused field should not also get a ring around its whole row"
+        );
+        // The box itself is still there, and carries the focus color.
+        assert!(
+            out.iter().any(|i| i.color == ring),
+            "the field's own border should show focus"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_text_field_keeps_a_neutral_border() {
+        let theme = Theme::builtin_default();
+        let mut fonts = fonts();
+        let mut ui = Ui::new();
+        ui.layout(
+            &[Widget::text(WidgetId(1), "Rename to", "README.md", "")],
+            Rect::new(0, 0, 400, 200),
+            20,
+        );
+
+        let mut out = Vec::new();
+        draw_widgets(&mut out, &mut fonts, &ui, &theme, colors());
+
+        let ring = colors().convert_opaque(theme.cursor());
+        assert!(
+            !out.iter().any(|i| i.color == ring),
+            "an unfocused field must not look focused"
+        );
+    }
+
+    #[test]
+    fn the_panel_title_lines_up_with_the_rows_beneath_it() {
+        let theme = Theme::builtin_default();
+        let mut fonts = fonts();
+        let panel = Rect::new(0, 0, 400, 300);
+
+        let mut out = Vec::new();
+        let body = draw_panel_title(
+            &mut out,
+            &mut fonts,
+            panel,
+            "Settings",
+            &theme,
+            colors(),
+            20.0,
+        );
+        let title_x = out
+            .iter()
+            .filter(|i| i.flags & crate::FLAG_TEXTURED != 0)
+            .map(|i| i.position[0])
+            .fold(f32::MAX, f32::min);
+
+        let mut ui = Ui::new();
+        ui.layout(&[Widget::toggle(WidgetId(1), "Theme", false)], body, 20);
+        let row_x = ui.placed()[0].rect.x as f32;
+
+        // A heading indented differently from what it heads reads as a misalignment.
+        // Within a pixel: the title is a glyph origin, the row a rect edge.
+        assert!(
+            (title_x - row_x).abs() <= 1.0,
+            "title starts at {title_x}, rows at {row_x}"
+        );
+    }
+
 }

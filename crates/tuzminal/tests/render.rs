@@ -24,9 +24,20 @@ struct Harness {
     queue: wgpu::Queue,
 }
 
+/// Serializes device creation across the tests in this binary.
+///
+/// Every test builds its own instance, adapter and device. Doing that from a dozen
+/// threads at once segfaults intermittently inside the Mesa driver — roughly one run
+/// in three here — which reads as a failure in whichever test happened to be running.
+/// The tests themselves are independent; only the driver's setup path is not.
+static ADAPTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Harness {
     /// Create a headless device, or `None` when no adapter exists.
     fn new() -> Option<Self> {
+        // Poisoning does not matter: the guard protects a driver, not our own state,
+        // so a panicking test leaves nothing inconsistent behind.
+        let _guard = ADAPTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -552,6 +563,7 @@ fn two_split_panes_render_side_by_side_with_a_divider() {
         divider_width: 2,
         tab_bar_height: 0,
         status_bar_height: 0,
+        sidebar_width: 0,
         tab_width: 180,
         min_tab_width: 60,
         buttons: Vec::new(),
@@ -848,7 +860,16 @@ fn the_status_bar_draws_plugin_segments_with_their_own_colors() {
         opacity: 1.0,
     };
     let mut instances = Vec::new();
-    tuz_render::draw_status_bar(&mut instances, &mut fonts, bar, &items, &theme, colors);
+    tuz_render::draw_status_bar(
+        &mut instances,
+        &mut fonts,
+        bar,
+        &[],
+        &items,
+        &theme,
+        colors,
+        0.0,
+    );
 
     renderer.upload_atlas(&h.device, &h.queue, fonts.atlas_mut());
     let pixels = h.render(&mut renderer, &instances, Rgba::BLACK);
@@ -915,6 +936,7 @@ fn the_settings_panel_draws_over_a_dimmed_terminal() {
         "Tuzminal Settings",
         &theme,
         colors,
+        20.0,
     );
     ui.layout(&widgets, body, metrics.height);
     ui.focus(tuz_ui::WidgetId(1));

@@ -13,6 +13,7 @@
 
 use crate::instance::Instance;
 use tuz_layout::{ChromeButton, Rect};
+use tuz_ui::EntryKind;
 
 /// Side of the icon box, as a fraction of the button. The rest is breathing room.
 ///
@@ -59,6 +60,78 @@ fn outline(out: &mut Vec<Instance>, x: f32, y: f32, side: f32, stroke: f32, colo
     vbar(out, x + side - stroke / 2.0, y, side, stroke, color);
 }
 
+/// Draw a file-list row's icon centered in `rect`.
+///
+/// Geometry rather than a glyph, for the reason the toolbar icons are: no font is
+/// guaranteed to carry a folder character, and sourcing one per codepoint gave icons
+/// at three different design sizes depending on which font happened to win.
+pub fn entry(out: &mut Vec<Instance>, kind: EntryKind, rect: Rect, color: [f32; 4]) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let (x, y, side, stroke) = box_of(rect);
+    let (cx, cy) = (x + side / 2.0, y + side / 2.0);
+
+    match kind {
+        // An upward chevron: the same shape as "go up" everywhere else.
+        EntryKind::Parent => {
+            let arm = side * 0.35;
+            for turn in [
+                -std::f32::consts::FRAC_PI_4,
+                std::f32::consts::FRAC_PI_4,
+            ] {
+                out.push(Instance::rotated(
+                    cx - arm / 2.0,
+                    cy - stroke / 2.0,
+                    arm,
+                    stroke,
+                    color,
+                    turn,
+                ));
+            }
+        }
+
+        // A folder: a body with a raised tab along the top-left.
+        EntryKind::Directory => {
+            let tab_h = side * 0.16;
+            let body_y = y + tab_h;
+            out.push(Instance::solid(x, y, side * 0.45, tab_h * 2.0, color));
+            out.push(Instance::solid(x, body_y, side, side - tab_h, color));
+        }
+
+        // A page with the top-right corner cut away, which is what makes it read as
+        // a document rather than a plain rectangle.
+        EntryKind::File => {
+            let w = side * 0.78;
+            let fold = w * 0.34;
+            let left = cx - w / 2.0;
+            out.push(Instance::solid(left, y, w - fold, side, color));
+            out.push(Instance::solid(left + w - fold, y + fold, fold, side - fold, color));
+        }
+
+        // A page with a chevron over it: a link points somewhere else.
+        EntryKind::Symlink => {
+            let w = side * 0.78;
+            out.push(Instance::solid(cx - w / 2.0, y, w, side, color));
+            let arm = side * 0.3;
+            for turn in [
+                std::f32::consts::FRAC_PI_4,
+                -std::f32::consts::FRAC_PI_4,
+            ] {
+                out.push(Instance::rotated(
+                    cx - arm / 2.0,
+                    cy - stroke / 2.0,
+                    arm,
+                    stroke,
+                    // Punched out of the page, so it reads on top of it.
+                    [0.0, 0.0, 0.0, color[3]],
+                    turn,
+                ));
+            }
+        }
+    }
+}
+
 /// Draw `button`'s icon centered in its rect.
 ///
 /// `background` is whatever was painted behind the icon, needed only by the gear,
@@ -88,6 +161,56 @@ pub fn draw(
         ChromeButton::Minimize => hbar(out, x, y + side - stroke / 2.0, side, stroke, color),
 
         ChromeButton::Maximize => outline(out, x, y, side, stroke, color),
+
+        // A downward chevron, the same shape a dropdown wears everywhere.
+        ChromeButton::NewTabMenu => {
+            let arm = side * 0.34;
+            let apex_y = cy + arm / 2.0;
+            for turn in [
+                std::f32::consts::FRAC_PI_4,
+                -std::f32::consts::FRAC_PI_4,
+            ] {
+                out.push(Instance::rotated(
+                    cx - arm / 2.0,
+                    apex_y - stroke / 2.0,
+                    arm,
+                    stroke,
+                    color,
+                    turn,
+                ));
+            }
+        }
+
+        // A blocky question mark. Built from bars rather than a glyph for the same
+        // reason as everything else here, and squared off rather than curved because
+        // an arc approximated at sixteen pixels reads as a smudge.
+        ChromeButton::Help => {
+            let left = cx - side * 0.28;
+            let right = cx + side * 0.28;
+            let hook_bottom = y + side * 0.46;
+
+            // The top of the hook, then down its right side, then back to the centre.
+            hbar(out, left, y + stroke / 2.0, right - left, stroke, color);
+            vbar(out, right - stroke / 2.0, y, hook_bottom - y, stroke, color);
+            hbar(out, cx, hook_bottom - stroke / 2.0, right - cx, stroke, color);
+
+            // The stem, and the dot beneath it with a gap so the two stay distinct.
+            vbar(out, cx, hook_bottom, side * 0.22, stroke, color);
+            let dot = stroke * 1.4;
+            out.push(Instance::solid(
+                cx - dot / 2.0,
+                y + side - dot,
+                dot,
+                dot,
+                color,
+            ));
+        }
+
+        // A panel with a filled column down its left: the sidebar this opens.
+        ChromeButton::Explorer => {
+            outline(out, x, y, side, stroke, color);
+            out.push(Instance::solid(x, y, side * 0.36, side, color));
+        }
 
         // Two strokes turned a quarter turn apart. The length is the box diagonal so
         // the cross reaches the corners rather than stopping short of them.

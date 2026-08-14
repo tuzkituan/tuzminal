@@ -1,33 +1,38 @@
 name = "tuz-light"
 
-background = "#fafafa"
-foreground = "#383a42"
+# Warm paper rather than #ffffff. A pure-white terminal is the brightest thing on the
+# screen and reads as glare next to everything around it; pulling the background a few
+# points off white keeps the contrast with the text without the sheet-of-paper effect.
+background = "#f4f2ed"
+foreground = "#3b3f4a"
 
 cursor = "#4078f2"
-cursor_text = "#fafafa"
+cursor_text = "#f4f2ed"
 
-selection_background = "#d4d8e0"
-selection_foreground = "#383a42"
+selection_background = "#d5dae6"
+selection_foreground = "#3b3f4a"
 
-background_focused = "#ffffff"
-split_divider = "#d0d3d9"
+# The focused pane lifts slightly rather than going white, so the difference is
+# visible without either surface becoming the bright spot in the room.
+background_focused = "#fbfaf7"
+split_divider = "#dcd7cd"
 
 [normal]
-black   = "#383a42"
-red     = "#e45649"
-green   = "#50a14f"
-yellow  = "#c18401"
-blue    = "#4078f2"
-magenta = "#a626a4"
-cyan    = "#0184bc"
-white   = "#fafafa"
+black   = "#3b3f4a"
+red     = "#d64a3f"
+green   = "#4a9349"
+yellow  = "#b07701"
+blue    = "#3a6fe0"
+magenta = "#9a23a0"
+cyan    = "#0178ad"
+white   = "#f4f2ed"
 
 [bright]
 black   = "#6b6f7d"
-red     = "#f06a5e"
-green   = "#66b565"
-yellow  = "#d99a1c"
-blue    = "#5b8cf5"
-magenta = "#b944b7"
-cyan    = "#1a99d1"
-white   = "#ffffff"
+red     = "#e46255"
+green   = "#5da85c"
+yellow  = "#c78f18"
+blue    = "#5484ee"
+magenta = "#ae3fac"
+cyan    = "#178cc2"
+white   = "#fbfaf7"

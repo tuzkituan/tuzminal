@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tuzminal
+GenericName=Terminal
+Comment=A GPU-accelerated terminal emulator
+Exec=tuzminal
+Icon=tuzminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;
+StartupNotify=true

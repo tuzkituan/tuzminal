@@ -177,6 +177,20 @@ type IoThread = std::thread::JoinHandle<(
     alacritty_terminal::event_loop::State,
 )>;
 
+/// A pane's cursor position and scroll state, for reporting rather than drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneStatus {
+    /// Cursor line within the grid. Negative while the cursor is in history.
+    pub line: i32,
+    pub column: usize,
+    /// Lines scrolled back. Zero means the viewport is at the bottom.
+    pub display_offset: usize,
+    /// Lines currently held in scrollback.
+    pub history: usize,
+    pub columns: u16,
+    pub rows: u16,
+}
+
 /// A live terminal: PTY, child process, and grid.
 pub struct Session {
     pane: PaneId,
@@ -191,6 +205,12 @@ pub struct Session {
     /// Kept so the PTY thread can be joined on shutdown. The handle yields the
     /// event loop and its state back, which we discard.
     io_thread: Option<IoThread>,
+    /// Process id of the shell, when the platform lets us keep one.
+    ///
+    /// Recorded at spawn because the PTY is handed to the I/O thread immediately and
+    /// the child is unreachable from here afterwards. `None` on Windows, whose `Pty`
+    /// exposes no child handle, and for a detached session, which has no process.
+    child_pid: Option<u32>,
 }
 
 impl Session {
@@ -232,6 +252,14 @@ impl Session {
         let pty =
             tty::new(&pty_options, size.window_size(), pane.0 as u64).map_err(SessionError::Pty)?;
 
+        // Captured here because `EventLoop::new` takes the PTY by value and nothing
+        // can reach the child afterwards. Unix only: the Windows `Pty` exposes no
+        // child handle at all, so there is nothing to record.
+        #[cfg(unix)]
+        let child_pid = Some(pty.child().id());
+        #[cfg(not(unix))]
+        let child_pid = None;
+
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
             .map_err(SessionError::EventLoop)?;
         let notifier = Notifier(event_loop.channel());
@@ -246,6 +274,7 @@ impl Session {
             size,
             child_exited: false,
             io_thread: Some(io_thread),
+            child_pid,
         })
     }
 
@@ -267,11 +296,43 @@ impl Session {
             size,
             child_exited: false,
             io_thread: None,
+            child_pid: None,
         }
     }
 
     pub fn pane(&self) -> PaneId {
         self.pane
+    }
+    /// Cursor position and scroll state, for the status bar.
+    ///
+    /// Read from the grid rather than from a [`crate::TerminalFrame`], because that
+    /// deliberately reports no cursor when one is hidden or when the view is scrolled
+    /// back — it drives *drawing*, where showing a cursor in history would imply you
+    /// could type there. The status bar wants the position regardless, and scrolled
+    /// back is exactly when it is most worth knowing.
+    ///
+    /// One accessor rather than three because the mutex is contended with the PTY
+    /// thread; taking it once per frame instead of three times is the whole point.
+    pub fn status(&self) -> PaneStatus {
+        let term = self.term.lock();
+        let grid = term.grid();
+        PaneStatus {
+            line: grid.cursor.point.line.0,
+            column: grid.cursor.point.column.0,
+            display_offset: grid.display_offset(),
+            history: grid.history_size(),
+            columns: self.size.columns as u16,
+            rows: self.size.screen_lines as u16,
+        }
+    }
+
+    /// Process id of the shell, where the platform provides one.
+    ///
+    /// The only handle onto the running process: it is what lets the status bar ask
+    /// the operating system where the shell is, which no terminal escape sequence
+    /// reports and `alacritty_terminal` does not track.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
     }
     pub fn size(&self) -> TermSize {
         self.size
@@ -408,11 +469,24 @@ impl Session {
             let _ = notifier.0.send(Msg::Shutdown);
         }
         if let Some(handle) = self.io_thread.take() {
-            // A short wait is enough for a cooperative shutdown; blocking the UI
-            // indefinitely on a wedged child would be worse than leaking it.
-            if handle.join().is_err() {
-                log::warn!("{}: PTY thread panicked during shutdown", self.pane);
-            }
+            // Joined on a throwaway thread, never here. Two things fooled an earlier
+            // version of this into freezing the window:
+            //
+            //  - `JoinHandle` has no timed join, so a bare `join()` waits forever.
+            //  - Polling `is_finished()` first does not help. The thread's closure
+            //    returns almost immediately, but the value it returns *is* the
+            //    `EventLoop`, which owns the `Pty` — and `Pty`'s destructor sends
+            //    SIGHUP and waits for the child. Whoever joins therefore inherits
+            //    that wait. Measured at a full 30 seconds against a child that
+            //    ignores SIGHUP, with the whole UI frozen behind it.
+            //
+            // Handing the join to another thread keeps the child properly reaped and
+            // the descriptor properly closed, while closing a tab stays instant.
+            std::thread::spawn(move || {
+                if handle.join().is_err() {
+                    log::warn!("a PTY thread panicked during shutdown");
+                }
+            });
         }
     }
 }
@@ -677,4 +751,41 @@ mod select_all_tests {
         // Whitespace or nothing, but it must not crash on a grid of blanks.
         let _ = s.selection_text();
     }
+    /// Closing a tab must never be able to freeze the window.
+    ///
+    /// The regression this guards: `shutdown` used to `join()` with no timeout, so a
+    /// PTY thread that missed the shutdown message hung the UI thread with it. A
+    /// child that ignores everything is the case that exposed it, so that is what is
+    /// spawned here.
+    #[test]
+    fn shutting_down_a_busy_child_returns_within_its_budget() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        std::mem::forget(rx);
+
+        let mut cfg = Config::default();
+        cfg.shell.program = Some("/bin/sh".to_owned());
+        // Ignores SIGHUP and sleeps: the least cooperative thing a shell can be.
+        cfg.shell.args = vec![
+            "-c".to_owned(),
+            "trap '' HUP TERM; sleep 30".to_owned(),
+        ];
+
+        let size = TermSize::new(80, 24, 8, 16);
+        let Ok(mut session) = Session::spawn(PaneId(1), &cfg, size, tx, Arc::new(|| {})) else {
+            // No PTY available (a sandbox, some CI): the timing claim cannot be made,
+            // and pretending otherwise would be a test that passes by not running.
+            eprintln!("skipping: could not open a PTY");
+            return;
+        };
+
+        let start = std::time::Instant::now();
+        session.shutdown();
+        let took = start.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "shutdown took {took:?}: closing a tab is waiting for the child to die"
+        );
+    }
+
 }

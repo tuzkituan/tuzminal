@@ -1,0 +1,38 @@
+name = "solarized-light"
+
+# Adapted from Solarized (ethanschoonover.com/solarized), light variant.
+# base3 background, base00 text — the same ANSI sixteen as the dark variant,
+# which is the point of the palette.
+
+background = "#fdf6e3"
+foreground = "#657b83"
+
+cursor = "#586e75"
+cursor_text = "#fdf6e3"
+
+selection_background = "#eee8d5"
+selection_foreground = "#586e75"
+
+# The focused pane lifts slightly from the rest, and the divider recedes.
+background_focused = "#fffbf0"
+split_divider = "#d8d2c0"
+
+[normal]
+black   = "#073642"
+red     = "#dc322f"
+green   = "#859900"
+yellow  = "#b58900"
+blue    = "#268bd2"
+magenta = "#d33682"
+cyan    = "#2aa198"
+white   = "#eee8d5"
+
+[bright]
+black   = "#002b36"
+red     = "#cb4b16"
+green   = "#586e75"
+yellow  = "#657b83"
+blue    = "#839496"
+magenta = "#6c71c4"
+cyan    = "#93a1a1"
+white   = "#fdf6e3"

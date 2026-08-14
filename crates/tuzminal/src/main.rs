@@ -1,10 +1,18 @@
 //! Tuzminal — a fast, modular, GPU-accelerated terminal emulator.
 
 mod app;
+mod appicon;
+mod explorer;
 mod gpu;
+mod help;
+mod ide;
 mod keys;
+mod menu;
 mod pkg;
+mod proc;
 mod settings;
+mod shells;
+mod status;
 
 use anyhow::{Context, Result};
 use clap::Parser;

@@ -77,3 +77,10 @@ debug = 1
 # Debug builds of a GPU app are unusably slow without optimizing dependencies.
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.dev]
+# The workspace crates are the hot path too — VT parsing, glyph rasterization and
+# instance building all run per frame, and at opt-level 0 they are slow enough to be
+# felt while dragging a window edge. Level 1 keeps incremental rebuilds quick while
+# removing the worst of the debug-build overhead.
+opt-level = 1

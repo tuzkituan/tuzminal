@@ -98,6 +98,30 @@ fn wide_text(lines: usize) -> Vec<u8> {
     out
 }
 
+/// Cost of a single grid resize, which is what a window drag pays per cell step.
+///
+/// Separated out because it is the one per-frame cost that scales with scrollback
+/// rather than with the visible grid: reflowing history on a column change touches
+/// every stored line, not just the fifty on screen.
+fn bench_resize(scrollback: usize) {
+    let mut s = Session::detached(PaneId(1), TermSize::new(COLUMNS, ROWS, 8, 16));
+    s.set_scrollback(scrollback as u32);
+    s.feed_for_test(&plain_text(scrollback));
+
+    let start = Instant::now();
+    let steps = 40;
+    for i in 0..steps {
+        // Alternate width so each step is a real reflow rather than a no-op.
+        let cols = COLUMNS - (i % 2) as u16;
+        s.resize(TermSize::new(cols, ROWS, 8, 16));
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "resize w/ {scrollback} lines scrollback   {:>7.2} ms/step",
+        elapsed.as_secs_f64() * 1000.0 / steps as f64
+    );
+}
+
 fn main() {
     println!("tuz-core VT throughput ({COLUMNS}x{ROWS} grid)\n");
 
@@ -105,6 +129,10 @@ fn main() {
     bench("sgr colour changes", &colored_text(2_000), 20);
     bench("cursor addressing", &cursor_heavy(200), 20);
     bench("wide characters", &wide_text(2_000), 20);
+
+    println!();
+    bench_resize(1_000);
+    bench_resize(10_000);
 
     println!(
         "\nCompare against another terminal with:\n  \

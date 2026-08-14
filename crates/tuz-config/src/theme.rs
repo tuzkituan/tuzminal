@@ -14,9 +14,28 @@ use std::path::{Path, PathBuf};
 
 /// Themes compiled into the binary so a fresh install always renders correctly,
 /// even with no theme files on disk.
+/// Order matters only for the picker, which shows them in this order: the two
+/// house themes first, then the widely-known palettes alphabetically.
 pub const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("tuz-dark", include_str!("../themes/tuz-dark.toml")),
     ("tuz-light", include_str!("../themes/tuz-light.toml")),
+    (
+        "catppuccin-mocha",
+        include_str!("../themes/catppuccin-mocha.toml"),
+    ),
+    ("dracula", include_str!("../themes/dracula.toml")),
+    ("gruvbox-dark", include_str!("../themes/gruvbox-dark.toml")),
+    ("nord", include_str!("../themes/nord.toml")),
+    ("one-dark", include_str!("../themes/one-dark.toml")),
+    (
+        "solarized-dark",
+        include_str!("../themes/solarized-dark.toml"),
+    ),
+    (
+        "solarized-light",
+        include_str!("../themes/solarized-light.toml"),
+    ),
+    ("tokyo-night", include_str!("../themes/tokyo-night.toml")),
 ];
 
 pub const DEFAULT_THEME: &str = "tuz-dark";

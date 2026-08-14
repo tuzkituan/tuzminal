@@ -41,6 +41,9 @@ mod ids {
     pub const ALWAYS_TAB_BAR: WidgetId = WidgetId(13);
     pub const DECORATIONS: WidgetId = WidgetId(14);
     pub const CORNER_RADIUS: WidgetId = WidgetId(15);
+    pub const STATUS_BAR: WidgetId = WidgetId(16);
+    pub const EXPLORER_WIDTH: WidgetId = WidgetId(17);
+    pub const EXPLORER_HIDDEN: WidgetId = WidgetId(18);
 
     pub const CURSOR_SHAPE: WidgetId = WidgetId(20);
     pub const CURSOR_BLINK: WidgetId = WidgetId(21);
@@ -90,6 +93,9 @@ pub struct SettingsPanel {
     families: Vec<String>,
     /// Theme names, likewise gathered once.
     themes: Vec<String>,
+    /// Installed shells, read once. `/etc/shells` does not change under a running
+    /// process, and re-reading it per frame would be a file read per frame.
+    shells: Vec<String>,
     dirty: bool,
 }
 
@@ -100,6 +106,7 @@ impl SettingsPanel {
             snapshot: config.clone(),
             families,
             themes,
+            shells: crate::shells::options(config.shell.program.as_deref()),
             dirty: false,
         }
     }
@@ -205,6 +212,20 @@ impl SettingsPanel {
                 "Window decorations",
                 config.window.decorations,
             ),
+            Widget::toggle(ids::STATUS_BAR, "Status bar", config.status_bar.enabled),
+            Widget::stepper(
+                ids::EXPLORER_WIDTH,
+                "Explorer width",
+                config.explorer.width as f32,
+                tuz_config::EXPLORER_MIN_WIDTH as f32..=tuz_config::EXPLORER_MAX_WIDTH as f32,
+                1.0,
+                0,
+            ),
+            Widget::toggle(
+                ids::EXPLORER_HIDDEN,
+                "Explorer shows hidden files",
+                config.explorer.show_hidden,
+            ),
             Widget::stepper(
                 ids::CORNER_RADIUS,
                 "Corner radius",
@@ -260,11 +281,16 @@ impl SettingsPanel {
                 0,
             ),
             Widget::heading("Shell"),
-            Widget::text(
+            // A picker rather than a text field: the installed shells are knowable,
+            // and typing a path only to find out it was wrong at the next restart is
+            // the worse half of the trade. A hand-edited path that is not installed
+            // stays in the list, so a deliberate config edit is not undone by opening
+            // this page.
+            Widget::select(
                 ids::SHELL_PROGRAM,
                 "Program",
-                config.shell.program.clone().unwrap_or_default(),
-                "$SHELL",
+                self.shells.clone(),
+                crate::shells::selected_index(&self.shells, config.shell.program.as_deref()),
             ),
             // Space-separated rather than a list editor: shell arguments are almost
             // always one or two flags, and a full list widget would be more UI than
@@ -281,7 +307,16 @@ impl SettingsPanel {
                 config.shell.term.clone(),
                 "xterm-256color",
             ),
-            Widget::heading(""),
+        ]
+    }
+
+    /// The actions, pinned to the bottom of the page rather than scrolling with it.
+    ///
+    /// Stacked at the end of the list they were off screen exactly when wanted: you
+    /// change something near the top and then have to scroll all the way down to save
+    /// it. Pinned, they are one click away wherever the body happens to be scrolled.
+    pub fn footer_widgets(&self) -> Vec<Widget> {
+        vec![
             // Save is disabled until something changes, so the button itself says
             // whether there is anything to write.
             if self.dirty {
@@ -318,12 +353,20 @@ impl SettingsPanel {
                 ids::LIGATURES => set(&mut config.font.ligatures, on),
                 ids::ALWAYS_TAB_BAR => set(&mut config.window.always_show_tab_bar, on),
                 ids::DECORATIONS => set(&mut config.window.decorations, on),
+                ids::STATUS_BAR => set(&mut config.status_bar.enabled, on),
+                ids::EXPLORER_HIDDEN => set(&mut config.explorer.show_hidden, on),
                 ids::CURSOR_BLINK => set(&mut config.cursor.blink, on),
                 ids::VSYNC => set(&mut config.performance.vsync, on),
                 _ => false,
             },
 
             UiAction::Selected(id, index) => match id {
+                ids::SHELL_PROGRAM => {
+                    // Index 0 is "Default", which means no override at all — writing
+                    // the literal word would try to exec a program called "Default".
+                    let next = crate::shells::from_selection(&self.shells, index);
+                    set(&mut config.shell.program, next)
+                }
                 ids::THEME => match self.themes.get(index) {
                     Some(name) => set(&mut config.theme, name.clone()),
                     None => false,
@@ -351,16 +394,6 @@ impl SettingsPanel {
             },
 
             UiAction::Edited(id, ref text) => match id {
-                ids::SHELL_PROGRAM => {
-                    // Empty means "use $SHELL", which is what `None` encodes — an
-                    // empty string would try to exec a program with no name.
-                    let next = if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(text.clone())
-                    };
-                    set(&mut config.shell.program, next)
-                }
                 ids::SHELL_ARGS => {
                     let next: Vec<String> = text.split_whitespace().map(|s| s.to_owned()).collect();
                     set(&mut config.shell.args, next)
@@ -384,6 +417,7 @@ impl SettingsPanel {
                 ids::PADDING_Y => set(&mut config.window.padding.y, value.round() as u16),
                 ids::OPACITY => set(&mut config.window.opacity, value),
                 ids::CORNER_RADIUS => set(&mut config.window.corner_radius, value),
+                ids::EXPLORER_WIDTH => set(&mut config.explorer.width, value.round() as u16),
                 ids::SCROLLBACK => set(&mut config.scrollback.lines, value.round() as u32),
                 ids::SCROLL_MULTIPLIER => set(
                     &mut config.scrollback.scroll_multiplier,
@@ -405,13 +439,6 @@ impl SettingsPanel {
         }
     }
 
-    /// The panel's preferred size for a given cell size.
-    ///
-    /// Derived from the font so the panel scales with the text rather than being a
-    /// fixed pixel box that is cramped at large sizes and vast at small ones.
-    pub fn preferred_size(cell_width: u32, cell_height: u32) -> (u32, u32) {
-        (cell_width * 62, cell_height * 26)
-    }
 }
 
 /// Assign only if different, reporting whether it changed.
@@ -567,6 +594,8 @@ mod tests {
                 c.window.always_show_tab_bar
             }),
             (ids::DECORATIONS, |c: &Config| c.window.decorations),
+            (ids::STATUS_BAR, |c: &Config| c.status_bar.enabled),
+            (ids::EXPLORER_HIDDEN, |c: &Config| c.explorer.show_hidden),
             (ids::CURSOR_BLINK, |c: &Config| c.cursor.blink),
             (ids::VSYNC, |c: &Config| c.performance.vsync),
         ] {
@@ -671,16 +700,19 @@ mod tests {
         let mut config = Config::default();
         let mut p = panel(&config);
 
-        let widgets = p.widgets(&config);
+        // Save lives in the pinned footer, not the scrolling body.
         assert!(
-            !find(&widgets, ids::SAVE).is_interactive(),
+            !find(&p.footer_widgets(), ids::SAVE).is_interactive(),
             "nothing to save yet"
+        );
+        assert!(
+            p.widgets(&config).iter().all(|w| w.id() != Some(ids::SAVE)),
+            "the body must not carry a second copy of Save"
         );
 
         p.apply(UiAction::Changed(ids::FONT_SIZE, 20.0), &mut config);
-        let widgets = p.widgets(&config);
         assert!(
-            find(&widgets, ids::SAVE).is_interactive(),
+            find(&p.footer_widgets(), ids::SAVE).is_interactive(),
             "now it can save"
         );
     }
@@ -751,13 +783,6 @@ mod tests {
                 });
             }
         }
-    }
-
-    #[test]
-    fn the_panel_size_scales_with_the_font() {
-        let small = SettingsPanel::preferred_size(7, 15);
-        let large = SettingsPanel::preferred_size(14, 30);
-        assert!(large.0 > small.0 && large.1 > small.1);
     }
 
     #[test]

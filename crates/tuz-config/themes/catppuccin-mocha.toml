@@ -1,0 +1,36 @@
+name = "catppuccin-mocha"
+
+# Adapted from Catppuccin Mocha (catppuccin.com).
+
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+
+cursor = "#f5e0dc"
+cursor_text = "#1e1e2e"
+
+selection_background = "#414459"
+selection_foreground = "#cdd6f4"
+
+# The focused pane lifts slightly from the rest, and the divider recedes.
+background_focused = "#28283d"
+split_divider = "#45475a"
+
+[normal]
+black   = "#45475a"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#bac2de"
+
+[bright]
+black   = "#585b70"
+red     = "#f38ba8"
+green   = "#a6e3a1"
+yellow  = "#f9e2af"
+blue    = "#89b4fa"
+magenta = "#f5c2e7"
+cyan    = "#94e2d5"
+white   = "#a6adc8"

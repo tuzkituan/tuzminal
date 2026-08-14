@@ -43,8 +43,10 @@ pub use color::{ColorParseError, Rgba};
 pub use paths::{Paths, PathsError};
 pub use save::{save_config, SaveError};
 pub use schema::{
-    Config, Cursor, CursorShape, Font, GpuBackend, Padding, Performance, Plugins, PowerPreference,
-    ReloadActions, Scrollback, Shell, ValidationError, Window, DEFAULT_KEYS,
+    Config, Cursor, CursorShape, Explorer, Font, GpuBackend, Padding, Performance, Plugins,
+    PowerPreference,
+    ReloadActions, Scrollback, Shell, StatusBar, ValidationError, Window, DEFAULT_KEYS,
+    EXPLORER_MAX_WIDTH, EXPLORER_MIN_WIDTH,
 };
 pub use theme::{AnsiPalette, Theme, ThemeError, BUILTIN_THEMES, DEFAULT_THEME};
 pub use watcher::{ConfigEvent, ConfigWatcher, WatchError};

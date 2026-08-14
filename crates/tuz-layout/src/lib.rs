@@ -62,6 +62,8 @@ pub struct LayoutOptions {
     pub tab_bar_height: u32,
     /// Height reserved at the bottom for the status bar. Zero hides it.
     pub status_bar_height: u32,
+    /// Width reserved on the left for the file explorer. Zero hides it.
+    pub sidebar_width: u32,
     /// Preferred width of one tab. Tabs shrink below this when there are many, and
     /// never grow past it, so two tabs do not each take half the window.
     pub tab_width: u32,
@@ -82,6 +84,7 @@ impl Default for LayoutOptions {
             divider_width: 1,
             tab_bar_height: 0,
             status_bar_height: 0,
+            sidebar_width: 0,
             tab_width: 180,
             min_tab_width: 60,
             buttons: Vec::new(),
@@ -119,12 +122,17 @@ pub struct Frame {
     pub tab_close: Vec<Rect>,
     /// Action buttons packed against the right of the strip.
     pub actions: Vec<(ChromeButton, Rect)>,
+    /// The explorer sidebar, or a zero-width rect when it is closed.
+    pub sidebar: Rect,
 }
 
 /// A clickable button in the tab strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChromeButton {
     NewTab,
+    NewTabMenu,
+    Explorer,
+    Help,
     Settings,
     SplitRight,
     SplitDown,
@@ -142,7 +150,7 @@ impl ChromeButton {
     /// nothing to do with any particular tab, so they live at the far edge where
     /// they will not shift around as tabs open and close.
     pub fn leading(self) -> bool {
-        matches!(self, ChromeButton::NewTab)
+        matches!(self, ChromeButton::NewTab | ChromeButton::NewTabMenu)
     }
 
     /// The glyph drawn on the button.
@@ -152,7 +160,10 @@ impl ChromeButton {
     pub fn glyph(self) -> char {
         match self {
             ChromeButton::NewTab => '+',
+            ChromeButton::NewTabMenu => '⌄',
             ChromeButton::Settings => '⚙',
+            ChromeButton::Explorer => '▤',
+            ChromeButton::Help => '?',
             ChromeButton::SplitRight => '▥',
             ChromeButton::SplitDown => '▤',
             ChromeButton::Minimize => '—',
@@ -165,7 +176,10 @@ impl ChromeButton {
     pub fn describe(self) -> &'static str {
         match self {
             ChromeButton::NewTab => "New tab",
+            ChromeButton::NewTabMenu => "New tab with…",
             ChromeButton::Settings => "Settings",
+            ChromeButton::Explorer => "File explorer",
+            ChromeButton::Help => "Keyboard shortcuts",
             ChromeButton::SplitRight => "Split right",
             ChromeButton::SplitDown => "Split down",
             ChromeButton::Minimize => "Minimize",
@@ -253,8 +267,25 @@ impl Frame {
     /// Used to stop a click on the tab bar from also starting a text selection in
     /// whichever pane happens to be underneath.
     pub fn is_chrome(&self, x: i32, y: i32) -> bool {
+        // Deliberately NOT the sidebar. The caller treats chrome as the draggable
+        // title bar, so counting the sidebar here would make every click on a file
+        // start moving the window. It gets its own branch ahead of this one.
         self.tab_bar.contains(x, y) || self.status_bar.contains(x, y)
     }
+}
+
+/// What a tab holds.
+///
+/// Settings is a tab rather than an overlay so it behaves like everything else: it
+/// can be switched away from and back to without losing its scroll position, it does
+/// not black out the terminal behind it, and closing it is the same gesture as
+/// closing anything else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TabKind {
+    #[default]
+    Terminal,
+    Settings,
+    Help,
 }
 
 /// One tab: a pane tree plus which of its panes has focus.
@@ -262,6 +293,9 @@ impl Frame {
 pub struct Tab {
     root: Node,
     focus: PaneId,
+    /// What this tab shows. Terminal tabs run shells; a settings tab has a pane rect
+    /// for layout purposes but never gets a PTY.
+    kind: TabKind,
     /// Explicit title set by a plugin or the user. When absent the UI falls back
     /// to the focused pane's process title.
     pub title: Option<String>,
@@ -269,11 +303,20 @@ pub struct Tab {
 
 impl Tab {
     fn new(pane: PaneId) -> Self {
+        Self::of_kind(pane, TabKind::Terminal)
+    }
+
+    fn of_kind(pane: PaneId, kind: TabKind) -> Self {
         Self {
             root: Node::leaf(pane),
             focus: pane,
+            kind,
             title: None,
         }
+    }
+
+    pub fn kind(&self) -> TabKind {
+        self.kind
     }
 
     pub fn root(&self) -> &Node {
@@ -468,10 +511,28 @@ impl Layout {
 
     /// Append a tab with a single pane and make it active.
     pub fn new_tab(&mut self) -> PaneId {
+        self.new_tab_of(TabKind::Terminal)
+    }
+
+    /// Open a tab of a given kind and make it active.
+    pub fn new_tab_of(&mut self, kind: TabKind) -> PaneId {
         let pane = self.alloc_pane();
-        self.tabs.push(Tab::new(pane));
+        self.tabs.push(Tab::of_kind(pane, kind));
         self.active = self.tabs.len() - 1;
         pane
+    }
+
+    /// Index of the first tab of `kind`, if any.
+    ///
+    /// Used to keep settings to a single tab: opening it twice should return you to
+    /// the one you already have, with its scroll position and pending edits intact.
+    pub fn tab_of_kind(&self, kind: TabKind) -> Option<usize> {
+        self.tabs.iter().position(|t| t.kind == kind)
+    }
+
+    /// The kind of the tab currently shown.
+    pub fn active_kind(&self) -> TabKind {
+        self.tabs.get(self.active).map(|t| t.kind).unwrap_or_default()
     }
 
     /// Close a whole tab. Returns the panes it held so their PTYs can be closed.
@@ -587,6 +648,22 @@ impl Layout {
                 .saturating_sub(status_bar.height),
         );
 
+        // The sidebar takes from the left of the body, the way the status bar takes
+        // from the bottom, so the panes lay out into what is left and every grid
+        // shrinks by exactly the width reserved here.
+        let sidebar_width = opts.sidebar_width.min(body.width);
+        let sidebar = if sidebar_width > 0 {
+            Rect::new(body.x, body.y, sidebar_width, body.height)
+        } else {
+            Rect::new(body.x, body.y, 0, body.height)
+        };
+        let body = Rect::new(
+            body.x + sidebar.width as i32,
+            body.y,
+            body.width.saturating_sub(sidebar.width),
+            body.height,
+        );
+
         // Action buttons are square, sized from the strip height, and packed from the
         // right. Tabs then divide whatever is left, so a tab can never sit underneath
         // a button.
@@ -657,6 +734,7 @@ impl Layout {
             tabs,
             tab_close,
             actions,
+            sidebar,
         }
     }
 }
@@ -774,6 +852,7 @@ mod tests {
             divider_width: 0,
             tab_bar_height: 0,
             status_bar_height: 0,
+            sidebar_width: 0,
             tab_width: 180,
             min_tab_width: 60,
             buttons: Vec::new(),
@@ -1179,6 +1258,107 @@ mod chrome_tests {
     }
 
     #[test]
+    fn the_sidebar_comes_out_of_the_pane_body() {
+        let (mut layout, _) = Layout::new();
+        layout.split(Direction::Right).unwrap();
+
+        let window = Rect::new(0, 0, 800, 600);
+        let mut opts = opts_with_chrome();
+        let without: Vec<Rect> = layout
+            .compute(window, &opts)
+            .panes
+            .iter()
+            .map(|p| p.rect)
+            .collect();
+
+        opts.sidebar_width = 200;
+        let frame = layout.compute(window, &opts);
+
+        assert_eq!(frame.sidebar.width, 200);
+        assert_eq!(frame.sidebar.x, window.x);
+        // No pane may sit under it, or the sidebar would be drawn over live terminal
+        // content and clicks would land on whichever won.
+        for pane in &frame.panes {
+            assert!(
+                pane.rect.x >= frame.sidebar.right(),
+                "pane {:?} overlaps the sidebar {:?}",
+                pane.rect,
+                frame.sidebar
+            );
+        }
+        // And every pane really did shrink, which is what forces the PTY resize.
+        for (before, after) in without.iter().zip(&frame.panes) {
+            assert!(after.rect.width < before.width);
+        }
+    }
+
+    #[test]
+    fn a_closed_sidebar_takes_no_room_and_is_not_chrome() {
+        let (layout, _) = Layout::new();
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts_with_chrome());
+
+        assert_eq!(frame.sidebar.width, 0);
+        assert!(!frame.sidebar.contains(0, 300));
+    }
+
+    #[test]
+    fn the_sidebar_is_not_chrome() {
+        let (layout, _) = Layout::new();
+        let mut opts = opts_with_chrome();
+        opts.sidebar_width = 200;
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts);
+
+        // `is_chrome` means "the draggable title bar" to the caller, which drags the
+        // window on a press. Counting the sidebar would make clicking a file move the
+        // window instead of selecting it.
+        assert!(!frame.is_chrome(10, 300));
+        assert!(frame.sidebar.contains(10, 300), "but it is still the sidebar");
+    }
+
+    #[test]
+    fn a_sidebar_wider_than_the_window_is_clamped_rather_than_underflowing() {
+        let (layout, _) = Layout::new();
+        let mut opts = opts_with_chrome();
+        opts.sidebar_width = 10_000;
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts);
+
+        assert_eq!(frame.sidebar.width, 800);
+        // The pane still needs a valid grid even with nothing left for it.
+        assert!(frame.panes[0].cols >= 1 && frame.panes[0].rows >= 1);
+    }
+
+    #[test]
+    fn settings_is_found_by_kind_so_it_is_never_opened_twice() {
+        let (mut layout, _) = Layout::new();
+        assert_eq!(layout.tab_of_kind(TabKind::Settings), None);
+
+        layout.new_tab_of(TabKind::Settings);
+        assert_eq!(layout.tab_of_kind(TabKind::Settings), Some(1));
+        assert_eq!(layout.active_kind(), TabKind::Settings);
+
+        // Switching away must not change what kind the settings tab is, or the page
+        // would keep the keyboard from behind another tab.
+        layout.select_tab(0);
+        assert_eq!(layout.active_kind(), TabKind::Terminal);
+        assert_eq!(layout.tab_of_kind(TabKind::Settings), Some(1));
+
+        layout.close_tab(1);
+        assert_eq!(layout.tab_of_kind(TabKind::Settings), None);
+    }
+
+    #[test]
+    fn a_settings_tab_still_gets_a_pane_rect_to_draw_into() {
+        let (mut layout, _) = Layout::new();
+        layout.new_tab_of(TabKind::Settings);
+
+        // The tab carries a pane purely so the existing layout code needs no special
+        // case; nothing ever starts a shell for it.
+        let frame = layout.compute(Rect::new(0, 0, 800, 600), &opts_with_chrome());
+        assert_eq!(frame.panes.len(), 1, "the page needs somewhere to draw");
+        assert!(frame.panes[0].rect.height > 0);
+    }
+
+    #[test]
     fn new_tab_follows_the_last_tab_and_the_rest_pack_right() {
         let (mut layout, _) = Layout::new();
         layout.new_tab();
@@ -1255,6 +1435,7 @@ mod chrome_tests {
             divider_width: 0,
             tab_bar_height: 24,
             status_bar_height: 20,
+            sidebar_width: 0,
             tab_width: 180,
             min_tab_width: 60,
             buttons: Vec::new(),

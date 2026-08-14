@@ -1,0 +1,37 @@
+name = "nord"
+
+# Adapted from Nord (nordtheme.com). Polar Night for the surfaces, Snow Storm
+# for text, Frost and Aurora for the ANSI colors.
+
+background = "#2e3440"
+foreground = "#d8dee9"
+
+cursor = "#d8dee9"
+cursor_text = "#2e3440"
+
+selection_background = "#434c5e"
+selection_foreground = "#eceff4"
+
+# The focused pane lifts slightly from the rest, and the divider recedes.
+background_focused = "#3b4252"
+split_divider = "#434c5e"
+
+[normal]
+black   = "#3b4252"
+red     = "#bf616a"
+green   = "#a3be8c"
+yellow  = "#ebcb8b"
+blue    = "#81a1c1"
+magenta = "#b48ead"
+cyan    = "#88c0d0"
+white   = "#e5e9f0"
+
+[bright]
+black   = "#4c566a"
+red     = "#bf616a"
+green   = "#a3be8c"
+yellow  = "#ebcb8b"
+blue    = "#81a1c1"
+magenta = "#b48ead"
+cyan    = "#8fbcbb"
+white   = "#eceff4"

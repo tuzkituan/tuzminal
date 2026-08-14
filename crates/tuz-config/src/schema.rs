@@ -21,6 +21,8 @@ pub struct Config {
     pub shell: Shell,
     pub performance: Performance,
     pub plugins: Plugins,
+    pub status_bar: StatusBar,
+    pub explorer: Explorer,
 
     /// Name of the theme to load, resolved by [`crate::Theme::load`].
     pub theme: String,
@@ -45,6 +47,8 @@ impl Default for Config {
             shell: Shell::default(),
             performance: Performance::default(),
             plugins: Plugins::default(),
+            status_bar: StatusBar::default(),
+            explorer: Explorer::default(),
             theme: crate::theme::DEFAULT_THEME.to_owned(),
             // Empty because user entries are merged over DEFAULT_KEYS, not
             // substituted for them. See `effective_keys`.
@@ -79,6 +83,8 @@ pub const DEFAULT_KEYS: &[(&str, &str)] = &[
     ("ctrl+shift+0", "reset_font_size"),
     ("ctrl+shift+r", "reload_config"),
     ("ctrl+shift+comma", "open_settings"),
+    ("ctrl+shift+b", "open_explorer"),
+    ("f1", "open_help"),
     ("shift+pageup", "scroll_page_up"),
     ("shift+pagedown", "scroll_page_down"),
 ];
@@ -127,6 +133,8 @@ fn default_keys() -> BTreeMap<String, String> {
         ("ctrl+shift+0", "reset_font_size"),
         ("ctrl+shift+r", "reload_config"),
         ("ctrl+shift+comma", "open_settings"),
+        ("ctrl+shift+b", "open_explorer"),
+        ("f1", "open_help"),
         ("shift+pageup", "scroll_page_up"),
         ("shift+pagedown", "scroll_page_down"),
     ]
@@ -184,7 +192,7 @@ impl Default for Font {
             bold_family: None,
             italic_family: None,
             bold_italic_family: None,
-            size: 15.0,
+            size: 13.0,
             ligatures: false,
             features: BTreeMap::new(),
             // Emoji and CJK are the two fallbacks essentially every user needs,
@@ -263,13 +271,86 @@ impl Default for Window {
             center_grid: true,
             opacity: 1.0,
             decorations: false,
-            corner_radius: 10.0,
+            corner_radius: 6.0,
             columns: 100,
             rows: 30,
             title: "Tuzminal".to_owned(),
             dynamic_title: true,
             split_divider_width: 1,
             always_show_tab_bar: true,
+        }
+    }
+}
+
+/// The file browser down the left of the window.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Explorer {
+    /// Show the sidebar. Off by default: it takes width from every pane, and a
+    /// terminal that opens with a third of the window given to a file list is not
+    /// what most launches want.
+    pub enabled: bool,
+    /// Width in **cells**, not pixels, so it scales with the font like everything
+    /// else here rather than becoming a sliver at 20pt.
+    pub width: u16,
+    /// List dotfiles.
+    pub show_hidden: bool,
+    /// Group directories above files instead of sorting everything by name.
+    pub sort_dirs_first: bool,
+}
+
+impl Default for Explorer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: 28,
+            show_hidden: false,
+            sort_dirs_first: true,
+        }
+    }
+}
+
+/// Smallest and largest sidebar, in cells.
+///
+/// Below the floor there is no room for a file name; above the ceiling the sidebar is
+/// the window and the terminal is the sidebar.
+pub const EXPLORER_MIN_WIDTH: u16 = 12;
+pub const EXPLORER_MAX_WIDTH: u16 = 60;
+
+/// The strip along the bottom of the window.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StatusBar {
+    /// Show the bar at all. Turning it off gives the row back to the panes.
+    ///
+    /// A plugin contributing segments still forces the bar to appear, so disabling
+    /// the built-in content does not silently break a plugin you installed.
+    pub enabled: bool,
+    /// Working directory of the focused pane, and what it is running.
+    ///
+    /// The directory is read from the operating system, which only works on Linux —
+    /// no terminal escape sequence reports it and the VT library does not track it.
+    /// Elsewhere the segment is simply absent.
+    pub show_directory: bool,
+    /// Cursor line and column, and the pane's grid size.
+    pub show_cursor: bool,
+    /// How far the view is scrolled back. Only ever shown while scrolled.
+    pub show_scroll: bool,
+    /// Pane and tab counts, the theme name and the font size.
+    pub show_session: bool,
+}
+
+impl Default for StatusBar {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_directory: true,
+            show_cursor: true,
+            show_scroll: true,
+            // Off by default: pane and tab counts are already visible in the tab
+            // strip and the splits themselves, so this is the one group that mostly
+            // repeats what the window already shows.
+            show_session: false,
         }
     }
 }
@@ -629,6 +710,13 @@ impl Config {
             a.redraw = true;
         }
 
+        // Which segments show changes only what is painted into a strip whose height
+        // has not moved, so this needs a repaint and not a relayout. `enabled` is
+        // handled with the geometry below, because it does move it.
+        if self.status_bar != new.status_bar || self.explorer != new.explorer {
+            a.redraw = true;
+        }
+
         if self.theme != new.theme {
             a.reload_theme = true;
             a.redraw = true;
@@ -640,6 +728,9 @@ impl Config {
             || self.window.split_divider_width != new.window.split_divider_width
             || self.window.always_show_tab_bar != new.window.always_show_tab_bar
             || self.window.corner_radius != new.window.corner_radius
+            || self.status_bar.enabled != new.status_bar.enabled
+            || self.explorer.enabled != new.explorer.enabled
+            || self.explorer.width != new.explorer.width
         {
             a.relayout = true;
             a.redraw = true;
@@ -888,6 +979,33 @@ mod tests {
         let d = a.diff(&b);
         assert!(d.relayout);
         assert!(!d.rebuild_fonts);
+    }
+
+    #[test]
+    fn showing_the_status_bar_relayouts_because_every_grid_shrinks() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.status_bar.enabled = !a.status_bar.enabled;
+
+        let d = a.diff(&b);
+        // The strip's height comes out of the pane body, so every PTY has to be told
+        // its new size. Without this the bar appears and the bottom row of the
+        // terminal is drawn underneath it.
+        assert!(d.relayout, "toggling the strip changes every pane's grid");
+        assert!(d.redraw);
+    }
+
+    #[test]
+    fn changing_which_segments_show_does_not_relayout() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.status_bar.show_session = !a.status_bar.show_session;
+
+        let d = a.diff(&b);
+        // Same strip, same height, different text in it. Resizing every PTY for that
+        // would be a visible stutter for no reason.
+        assert!(d.redraw);
+        assert!(!d.relayout, "the strip's height did not move");
     }
 
     #[test]

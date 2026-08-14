@@ -33,6 +33,7 @@ use tuz_font::FontSystem;
 use tuz_input::{Action, Keymap};
 use tuz_layout::{
     Branch, CellSize, ChromeButton, CloseOutcome, Direction, Layout, LayoutOptions, PaneId, Rect,
+    TabKind,
 };
 use tuz_plugin::Host as PluginHost;
 use tuz_plugin_api::{Command as PluginCommand, Event as PluginEvent, KeyOutcome};
@@ -152,10 +153,51 @@ pub struct App {
     dragging: Option<Vec<Branch>>,
     /// The chrome button under the pointer, for hover highlighting.
     hovered_button: Option<ChromeButton>,
+    /// The toolbar button currently held down, for the pressed state.
+    pressed_button: Option<ChromeButton>,
+    /// The status-bar editor button under the pointer, and the one held down.
+    hovered_ide: Option<usize>,
+    pressed_ide: Option<usize>,
     /// When and where the title bar was last pressed, for double-click detection.
     last_title_click: Option<(Instant, i32, i32)>,
     /// Resize cursor currently set, so it is only pushed to the compositor on change.
     resize_cursor: Option<CursorIcon>,
+    /// The focused pane's working directory, for the status bar.
+    cwd: crate::status::CwdCache,
+    /// Editors found on `PATH` at startup, offered as buttons in the status bar.
+    ides: Vec<crate::ide::Ide>,
+    /// Where those buttons were drawn last frame, for hit-testing.
+    ///
+    /// Recorded from the draw rather than recomputed, so what is clickable is exactly
+    /// what is on screen.
+    ide_hits: Vec<(crate::ide::Ide, Rect)>,
+    /// Shell for the next session, when one was chosen from the menu.
+    ///
+    /// A one-shot rather than a field on the pane: it is only ever read by the
+    /// `ensure_session` that immediately follows setting it, and storing it per pane
+    /// would imply a pane could be respawned with it, which nothing does.
+    pending_shell: Option<String>,
+    /// The open dropdown, if any.
+    menu: Option<crate::menu::Menu>,
+    /// Where it was drawn last frame, for hit-testing what is on screen.
+    menu_rect: Option<Rect>,
+    /// The shortcut reference, when its tab is open.
+    help: Option<crate::help::HelpPage>,
+    /// The file explorer, when open. `None` means closed.
+    sidebar: Option<crate::explorer::Explorer>,
+    /// Whether the sidebar has the keyboard.
+    ///
+    /// Separate from being open, and that separation is the whole design: unlike the
+    /// settings page — which is a whole tab, with no terminal on screen to type into —
+    /// the sidebar sits beside a live shell, and the common case is looking at it
+    /// while typing. Being open must not take the keyboard.
+    sidebar_focused: bool,
+    /// Dragging the sidebar's right edge. Distinct from `dragging`, which is the
+    /// split-divider drag between panes.
+    /// Offset from the pointer to the sidebar's right edge while dragging it.
+    ///
+    /// Stored so the edge does not jump to the cursor on the first motion event.
+    dragging_sidebar: Option<i32>,
     /// The tab under the pointer, so only that tab shows a close button.
     hovered_tab: Option<usize>,
     /// True when the pointer is over the hovered tab's close button.
@@ -281,8 +323,21 @@ impl App {
             selecting: None,
             dragging: None,
             hovered_button: None,
+            pressed_button: None,
+            hovered_ide: None,
+            pressed_ide: None,
             last_title_click: None,
             resize_cursor: None,
+            cwd: crate::status::CwdCache::default(),
+            pending_shell: None,
+            menu: None,
+            menu_rect: None,
+            help: None,
+            ides: crate::ide::available(),
+            ide_hits: Vec::new(),
+            sidebar: None,
+            sidebar_focused: false,
+            dragging_sidebar: None,
             hovered_tab: None,
             hovered_close: false,
             panel: None,
@@ -335,10 +390,46 @@ impl App {
 
     /// Height of the status bar, or zero when no plugin is contributing anything.
     fn status_bar_height(&self) -> u32 {
-        if self.plugins.status_segments().is_empty() {
+        // The settings page has no terminal, so every built-in segment — cursor
+        // position, grid size, the shell's directory — would be reporting on a pane
+        // that is not on screen. An empty strip taking a row is worse than no strip.
+        if matches!(
+            self.layout.active_kind(),
+            TabKind::Settings | TabKind::Help
+        ) {
+            return 0;
+        }
+        // Config decides, with one exception: a plugin contributing segments still
+        // forces the strip to appear, so turning the built-in content off does not
+        // silently swallow a plugin the user installed.
+        if !self.settings.config().status_bar.enabled
+            && self.plugins.status_segments().is_empty()
+        {
             return 0;
         }
         self.cell_size().height + CHROME_PADDING
+    }
+
+    /// Width the sidebar occupies, in pixels. Zero when it is closed.
+    ///
+    /// Config stores cells rather than pixels so the sidebar scales with the font
+    /// instead of becoming a sliver at 20pt.
+    fn sidebar_width(&self) -> u32 {
+        if self.sidebar.is_none() {
+            return 0;
+        }
+        // A file browser beside the settings or shortcuts page browses nothing you
+        // could act on: its actions all reach into a shell, and there is no shell on
+        // those tabs. It stays open and comes back when a terminal tab does.
+        if self.layout.active_kind() != TabKind::Terminal {
+            return 0;
+        }
+        let cfg = self.settings.config();
+        let cells = cfg
+            .explorer
+            .width
+            .clamp(tuz_config::EXPLORER_MIN_WIDTH, tuz_config::EXPLORER_MAX_WIDTH);
+        cells as u32 * self.cell_size().width
     }
 
     fn layout_options(&self) -> LayoutOptions {
@@ -350,6 +441,7 @@ impl App {
             divider_width: cfg.window.split_divider_width as u32,
             tab_bar_height: self.tab_bar_height(),
             status_bar_height: self.status_bar_height(),
+            sidebar_width: self.sidebar_width(),
             tab_width: TAB_WIDTH,
             min_tab_width: MIN_TAB_WIDTH,
             buttons: self.chrome_buttons(),
@@ -374,24 +466,7 @@ impl App {
             return None;
         }
         let size = w.inner_size();
-        let (width, height) = (size.width as i32, size.height as i32);
-
-        let left = x <= RESIZE_BORDER;
-        let right = x >= width - RESIZE_BORDER;
-        let top = y <= RESIZE_BORDER;
-        let bottom = y >= height - RESIZE_BORDER;
-
-        Some(match (top, bottom, left, right) {
-            (true, _, true, _) => ResizeDirection::NorthWest,
-            (true, _, _, true) => ResizeDirection::NorthEast,
-            (_, true, true, _) => ResizeDirection::SouthWest,
-            (_, true, _, true) => ResizeDirection::SouthEast,
-            (true, ..) => ResizeDirection::North,
-            (_, true, ..) => ResizeDirection::South,
-            (_, _, true, _) => ResizeDirection::West,
-            (_, _, _, true) => ResizeDirection::East,
-            _ => return None,
-        })
+        resize_edge_at(x, y, size.width as i32, size.height as i32)
     }
 
     /// The corner radius actually in effect.
@@ -406,28 +481,21 @@ impl App {
         }
     }
 
-    /// The stretch of title bar occupied by neither a tab nor a button.
+    /// Toolbar buttons whose panel is on screen right now.
     ///
-    /// This is both where the window title is drawn and what drags the window, so the
-    /// two are deliberately the same rect: whatever looks like empty bar is grabbable.
-    fn title_area(frame: &tuz_layout::Frame) -> Option<Rect> {
-        if frame.tab_bar.height == 0 {
-            return None;
+    /// A toggle that looks identical whether its panel is open or shut leaves the
+    /// only way to find out being to press it and see.
+    fn active_buttons(&self) -> Vec<ChromeButton> {
+        let mut out = Vec::new();
+        if self.sidebar.is_some() {
+            out.push(ChromeButton::Explorer);
         }
-        let bar = frame.tab_bar;
-
-        // Left edge: past the last tab, and past new-tab if it follows them.
-        let mut left = frame.tabs.last().map(|t| t.right()).unwrap_or(bar.x);
-        let mut right = bar.right();
-        for (button, rect) in &frame.actions {
-            if button.leading() {
-                left = left.max(rect.right());
-            } else {
-                right = right.min(rect.x);
-            }
+        match self.layout.active_kind() {
+            TabKind::Settings => out.push(ChromeButton::Settings),
+            TabKind::Help => out.push(ChromeButton::Help),
+            TabKind::Terminal => {}
         }
-
-        (right > left).then(|| Rect::new(left, bar.y, (right - left) as u32, bar.height))
+        out
     }
 
     /// Window controls appear only without decorations: with them on, the compositor
@@ -439,10 +507,13 @@ impl App {
             buttons.push(ChromeButton::Maximize);
             buttons.push(ChromeButton::Minimize);
         }
+        buttons.push(ChromeButton::Help);
         buttons.push(ChromeButton::Settings);
+        buttons.push(ChromeButton::Explorer);
         buttons.push(ChromeButton::SplitDown);
         buttons.push(ChromeButton::SplitRight);
         buttons.push(ChromeButton::NewTab);
+        buttons.push(ChromeButton::NewTabMenu);
         buttons
     }
 
@@ -454,6 +525,13 @@ impl App {
         };
         if let Some(title) = &tab.title {
             return title.clone();
+        }
+        // A settings tab has no process to take a name from, and numbering it would
+        // say nothing about what it holds.
+        match tab.kind() {
+            TabKind::Settings => return "Settings".to_owned(),
+            TabKind::Help => return "Shortcuts".to_owned(),
+            TabKind::Terminal => {}
         }
         if let Some(title) = self.titles.get(&tab.focus()) {
             if !title.is_empty() {
@@ -513,9 +591,21 @@ impl App {
                 )
             });
 
+        // A menu choice overrides the configured program for this one spawn. Cloning
+        // the config is a spawn-time cost, and it keeps `Session::spawn` taking one
+        // config rather than a config plus an exception to it.
+        let config = match &self.pending_shell {
+            None => self.settings.config().clone(),
+            Some(program) => {
+                let mut cfg = self.settings.config().clone();
+                cfg.shell.program = Some(program.clone());
+                cfg
+            }
+        };
+
         match Session::spawn(
             pane,
-            self.settings.config(),
+            &config,
             size,
             self.events_tx.clone(),
             self.waker.clone(),
@@ -590,22 +680,51 @@ impl App {
         let blink_on = self.blink_on;
         let active_tab = self.layout.active_index();
 
+        // The built-in status segments, gathered here for the same reason as the tab
+        // titles: `self.cwd.get` needs `&mut self`, which the field destructure below
+        // rules out.
+        let status_left: Vec<tuz_plugin_api::StatusSegment> = {
+            let cfg = self.settings.config();
+            if cfg.status_bar.enabled {
+                let session = self.sessions.get(&active);
+                let pane_status = session.map(|s| s.status());
+                let pid = session.and_then(|s| s.child_pid());
+                let home = crate::proc::home();
+                let title = self.titles.get(&active).cloned();
+                let panes = self.layout.active_tab().pane_count();
+                let tabs = self.layout.tab_count();
+                let theme_name = self.settings.theme().name.clone();
+                let font_size = cfg.font.size;
+                let show = cfg.status_bar.clone();
+                let width = self.gpu.as_ref().map_or(0, |g| g.size().0) as f32;
+                let directory = self.cwd.get(active, pid, Instant::now()).map(std::path::Path::to_owned);
+
+                crate::status::build(&crate::status::StatusInput {
+                    directory: directory.as_deref(),
+                    home: home.as_deref(),
+                    title: title.as_deref(),
+                    cursor: pane_status.map(|s| (s.column as u16, s.line.max(0) as u16)),
+                    grid: pane_status.map_or((0, 0), |s| (s.columns, s.rows)),
+                    display_offset: pane_status.map_or(0, |s| s.display_offset),
+                    panes,
+                    tabs,
+                    theme: &theme_name,
+                    font_size,
+                    cell_width: cell.width as f32,
+                    width,
+                    show: &show,
+                })
+            } else {
+                Vec::new()
+            }
+        };
+
         // Chrome text is gathered here, before the `&mut` field borrows below, since
         // building a label needs `&self`.
         let tab_titles: Vec<String> = (0..self.layout.tab_count())
             .map(|i| self.tab_title(i))
             .collect();
 
-        // What the system title bar would have shown, for the strip to show instead:
-        // whatever the focused program set, falling back to the configured name.
-        let window_title: String = self
-            .settings
-            .config()
-            .window
-            .dynamic_title
-            .then(|| self.titles.get(&self.layout.active_pane()).cloned())
-            .flatten()
-            .unwrap_or_else(|| self.settings.config().window.title.clone());
 
         // A maximized window is flush with the screen edges, and rounding there just
         // punches holes showing the desktop through the corners.
@@ -652,10 +771,48 @@ impl App {
         let hovered_close = self.hovered_close;
         // Widgets are built here, before the `&mut` field borrows, because building a
         // row needs to read the config.
-        let panel_widgets: Option<Vec<Widget>> = self
+        let panel_widgets: Option<(Vec<Widget>, Vec<Widget>)> = self
             .panel
             .as_ref()
-            .map(|panel| panel.widgets(self.settings.config()));
+            .map(|panel| {
+                (
+                    panel.widgets(self.settings.config()),
+                    panel.footer_widgets(),
+                )
+            });
+
+        let ides = self.ides.clone();
+        let pressed_button = self.pressed_button;
+        let hovered_ide = self.hovered_ide;
+        let pressed_ide = self.pressed_ide;
+        let active_buttons = self.active_buttons();
+
+        // Same reason as the settings widgets: building rows needs `&self`, and the
+        // field destructure below rules that out.
+        let explorer_view: Option<(Vec<Widget>, Vec<Widget>, String, bool)> =
+            self.sidebar.as_ref().map(|e| {
+                (
+                    e.widgets(),
+                    e.footer_widgets(),
+                    crate::proc::display_path(e.dir(), crate::proc::home().as_deref()),
+                    self.sidebar_focused,
+                )
+            });
+
+        let help_widgets: Option<Vec<Widget>> = self
+            .help
+            .as_ref()
+            .map(|page| page.widgets(self.settings.config()));
+        let help_page: Option<Rect> = (self.layout.active_kind() == TabKind::Help)
+            .then(|| frame.panes.first().map(|p| p.rect))
+            .flatten();
+
+        // The settings page fills its tab's pane. Resolved here, before the field
+        // borrows below, and `None` whenever another tab is showing — which is what
+        // keeps the page from drawing over a terminal.
+        let settings_page: Option<Rect> = (self.layout.active_kind() == TabKind::Settings)
+            .then(|| frame.panes.first().map(|p| p.rect))
+            .flatten();
         let srgb = self
             .gpu
             .as_ref()
@@ -780,27 +937,14 @@ impl App {
                 radius,
             );
 
-            // Without decorations the strip is the title bar, so it carries the
-            // window title. With them, the compositor already shows it above us and a
-            // second copy is just noise.
-            if !cfg.window.decorations {
-                if let Some(area) = Self::title_area(&frame) {
-                    tuz_render::chrome::draw_window_title(
-                        instances,
-                        fonts,
-                        area,
-                        &window_title,
-                        theme,
-                        colors,
-                    );
-                }
-            }
 
             tuz_render::chrome::draw_chrome_buttons(
                 instances,
                 frame.tab_bar,
                 &frame.actions,
                 hovered_button,
+                pressed_button,
+                &active_buttons,
                 theme,
                 colors,
                 radius,
@@ -818,27 +962,197 @@ impl App {
             }
         }
 
+        let mut ide_hits: Vec<(crate::ide::Ide, Rect)> = Vec::new();
         if frame.status_bar.height > 0 {
-            let items: Vec<tuz_render::StatusItem<'_>> = status_items
+            // The editor buttons sit to the right of any plugin segments, nearest the
+            // corner, because they are the only part of the bar you press.
+            let ide_labels: Vec<String> = ides.iter().map(|ide| ide.icon.to_owned()).collect();
+
+            // The same three states as the toolbar buttons, expressed through the
+            // per-segment color overrides the status bar already supports rather than
+            // by teaching it a second notion of hovering.
+            let ide_colors: Vec<(Option<String>, Option<String>)> = (0..ides.len())
+                .map(|i| {
+                    if pressed_ide == Some(i) {
+                        (
+                            Some(theme.background.to_hex()),
+                            Some(theme.cursor().to_hex()),
+                        )
+                    } else if hovered_ide == Some(i) {
+                        (
+                            Some(theme.foreground.to_hex()),
+                            Some(theme.background_focused().to_hex()),
+                        )
+                    } else {
+                        (Some(theme.bright.black.to_hex()), None)
+                    }
+                })
+                .collect();
+
+            let mut right: Vec<tuz_render::StatusItem<'_>> = ide_labels
+                .iter()
+                .zip(&ide_colors)
+                .map(|(text, (fg, bg))| tuz_render::StatusItem {
+                    text,
+                    foreground: fg.as_deref(),
+                    background: bg.as_deref(),
+                })
+                .collect();
+            right.extend(status_items.iter().map(|segment| tuz_render::StatusItem {
+                text: &segment.text,
+                foreground: segment.foreground.as_deref(),
+                background: segment.background.as_deref(),
+            }));
+
+            let left: Vec<tuz_render::StatusItem<'_>> = status_left
                 .iter()
                 .map(|segment| tuz_render::StatusItem {
                     text: &segment.text,
-                    foreground: segment.foreground.as_deref(),
-                    background: segment.background.as_deref(),
+                    foreground: None,
+                    background: None,
                 })
                 .collect();
-            tuz_render::draw_status_bar(instances, fonts, frame.status_bar, &items, theme, colors);
+            let rects = tuz_render::draw_status_bar(
+                instances,
+                fonts,
+                frame.status_bar,
+                &left,
+                &right,
+                theme,
+                colors,
+                radius,
+            );
+            // Only the leading entries are ours; the rest belong to plugins.
+            ide_hits = ides
+                .iter()
+                .copied()
+                .zip(rects)
+                .collect();
         }
+        // The sidebar sits in its own column, carved out of the pane body, so it
+        // overlaps nothing and needs no scrim.
+
+        if let (Some((rows, footer, title, focused)), Some(explorer)) =
+            (explorer_view, self.sidebar.as_mut())
+        {
+            let rect = frame.sidebar;
+            if rect.width > 0 {
+                tuz_render::draw_page_frame(instances, rect, theme, colors, 0.0);
+                let body = tuz_render::draw_panel_title(
+                    instances,
+                    fonts,
+                    rect,
+                    &title,
+                    theme,
+                    colors,
+                    cell.height as f32,
+                );
+                explorer.ui.layout_split_with(
+                    &rows,
+                    &footer,
+                    body,
+                    tuz_ui::Metrics::from_cell(cell.width, cell.height),
+                );
+
+                // The prompt owns the keyboard while it is open, and the caret is
+                // only drawn for the focused widget.
+                explorer.focus_prompt();
+
+                let footer_area = explorer.ui.footer_area();
+                let scroll_area = Rect::new(
+                    body.x,
+                    body.y,
+                    body.width,
+                    body.height.saturating_sub(footer_area.height),
+                );
+
+                if footer_area.height > 0 {
+                    tuz_render::draw_footer_divider(instances, footer_area, theme, colors, 0.0);
+                }
+
+                tuz_render::draw_widgets_in(
+                    instances,
+                    fonts,
+                    explorer.ui.body(),
+                    &explorer.ui,
+                    theme,
+                    colors,
+                );
+
+                tuz_render::draw_widgets_in(
+                    instances,
+                    fonts,
+                    &explorer.ui.placed()[explorer.ui.body().len()..],
+                    &explorer.ui,
+                    theme,
+                    colors,
+                );
+                tuz_render::draw_scrollbar(instances, &explorer.ui, scroll_area, theme, colors);
+
+                // A line down the right edge, brighter while focused. Without it the
+                // sidebar having the keyboard is guesswork.
+                instances.push(tuz_render::Instance::solid(
+                    (rect.right() - 1) as f32,
+                    rect.y as f32,
+                    1.0,
+                    rect.height as f32,
+                    colors.convert_opaque(if focused {
+                        theme.cursor()
+                    } else {
+                        theme.split_divider()
+                    }),
+                ));
+            }
+        }
+
+        // The reference page: rows and a title, no footer and nothing to edit.
+        let mut help_body: Option<Rect> = None;
+        let mut help_start = 0u32;
+        let mut help_end = 0u32;
+        if let (Some(widgets), Some(rect), Some(page)) =
+            (help_widgets, help_page, self.help.as_mut())
+        {
+            tuz_render::draw_page_frame(instances, rect, theme, colors, radius);
+            let body =
+                tuz_render::draw_panel_title(
+                    instances,
+                    fonts,
+                    rect,
+                    "Shortcuts",
+                    theme,
+                    colors,
+                    cell.height as f32,
+                );
+            page.ui.layout_split_with(
+                &widgets,
+                &[],
+                body,
+                tuz_ui::Metrics::from_cell(cell.width, cell.height),
+            );
+            help_body = Some(body);
+
+            help_start = instances.len() as u32;
+            tuz_render::draw_widgets_in(instances, fonts, page.ui.body(), &page.ui, theme, colors);
+            help_end = instances.len() as u32;
+
+            tuz_render::draw_scrollbar(instances, &page.ui, body, theme, colors);
+        }
+
         // The panel goes last so it sits over terminal content and chrome alike.
         let mut panel_body: Option<Rect> = None;
         let mut widget_start = 0u32;
         let mut widget_end = 0u32;
-        if let (Some(widgets), Some(panel)) = (panel_widgets, self.panel.as_mut()) {
-            let (w, h) = SettingsPanel::preferred_size(cell.width, cell.height);
-            let window = Rect::from_size(gpu.size().0, gpu.size().1);
-            let rect = tuz_render::center_panel(window, w, h);
-
-            tuz_render::draw_panel_frame(instances, window, rect, theme, colors);
+        if let (Some((widgets, footer)), Some(rect), Some(panel)) =
+            (panel_widgets, settings_page, self.panel.as_mut())
+        {
+            // The page only owns the window's bottom corners when nothing is drawn
+            // below it; a status bar takes them over instead.
+            let page_radius = if frame.status_bar.height > 0 {
+                0.0
+            } else {
+                radius
+            };
+            tuz_render::draw_page_frame(instances, rect, theme, colors, page_radius);
             let body = tuz_render::draw_panel_title(
                 instances,
                 fonts,
@@ -846,18 +1160,70 @@ impl App {
                 "Tuzminal Settings",
                 theme,
                 colors,
+                cell.height as f32,
             );
-            panel.ui.layout(&widgets, body, cell.height);
-            panel_body = Some(body);
+            panel.ui.layout_split_with(
+                &widgets,
+                &footer,
+                body,
+                tuz_ui::Metrics::from_cell(cell.width, cell.height),
+            );
 
-            // Rows are clipped to the body, so a scrolled list cannot draw over the
-            // title bar or spill outside the panel.
+            // The scrolling region is the body minus the pinned footer, and that is
+            // what has to be clipped and scrolled against — not the whole page.
+            let footer_area = panel.ui.footer_area();
+            let scroll_area = Rect::new(
+                body.x,
+                body.y,
+                body.width,
+                body.height.saturating_sub(footer_area.height),
+            );
+            panel_body = Some(scroll_area);
+
+            tuz_render::draw_footer_divider(instances, footer_area, theme, colors, page_radius);
+
+            // Rows are clipped to the scrolling region, so a scrolled list cannot draw
+            // over the title bar or down into the footer.
             widget_start = instances.len() as u32;
-            tuz_render::draw_widgets(instances, fonts, &panel.ui, theme, colors);
+            tuz_render::draw_widgets_in(instances, fonts, panel.ui.body(), &panel.ui, theme, colors);
             widget_end = instances.len() as u32;
 
-            tuz_render::draw_scrollbar(instances, &panel.ui, body, theme, colors);
+            // Footer buttons are drawn after the clipped range so they are never cut
+            // off by it, and the scrollbar tracks the body alone.
+            tuz_render::draw_widgets_in(
+                instances,
+                fonts,
+                &panel.ui.placed()[panel.ui.body().len()..],
+                &panel.ui,
+                theme,
+                colors,
+            );
+            tuz_render::draw_scrollbar(instances, &panel.ui, scroll_area, theme, colors);
         }
+        // Above every panel: a dropdown is the thing being interacted with, and one
+        // drawn under the page it hangs over would be unusable.
+        let mut menu_rect: Option<Rect> = None;
+        if let Some(menu) = self.menu.as_ref() {
+            let window = Rect::from_size(gpu.size().0, gpu.size().1);
+            let rect = menu.rect(window, (cell.width, cell.height));
+            let rows: Vec<(Rect, &str)> = menu
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| (menu.row_rect(rect, i, cell.height), item.label.as_str()))
+                .collect();
+            tuz_render::draw_menu(
+                instances,
+                fonts,
+                rect,
+                &rows,
+                menu.selected,
+                theme,
+                colors,
+            );
+            menu_rect = Some(rect);
+        }
+
         if !toasts.is_empty() {
             let window = Rect::from_size(gpu.size().0, gpu.size().1);
             tuz_render::draw_toasts(instances, fonts, &toasts, window, theme, colors);
@@ -892,6 +1258,21 @@ impl App {
             }
             if chrome_end > divider_start {
                 pass.set_scissor_rect(0, 0, width, height);
+                if help_end > help_start {
+                    if let Some(body) = help_body {
+                        renderer.draw(pass, divider_start..help_start);
+                        pass.set_scissor_rect(
+                            body.x.max(0) as u32,
+                            body.y.max(0) as u32,
+                            body.width.min(width),
+                            body.height.min(height),
+                        );
+                        renderer.draw(pass, help_start..help_end);
+                        pass.set_scissor_rect(0, 0, width, height);
+                        renderer.draw(pass, help_end..chrome_end);
+                        return;
+                    }
+                }
                 match panel_body {
                     // Split around the widget range so only it is clipped: the panel
                     // frame, title and scrollbar must draw unclipped.
@@ -914,6 +1295,8 @@ impl App {
 
         // The field borrows end here, so `self` is usable again.
         self.panel_body = panel_body;
+        self.ide_hits = ide_hits;
+        self.menu_rect = menu_rect;
 
         match outcome {
             FrameOutcome::Presented | FrameOutcome::Skipped => {}
@@ -1013,12 +1396,14 @@ impl App {
             OpenSettings => {
                 // Toggles: pressing the binding again closes it, which is what every
                 // other panel-style UI does.
-                if self.panel.is_some() {
+                if self.settings_active() {
                     self.close_settings();
                 } else {
                     self.open_settings();
                 }
             }
+            OpenExplorer => self.toggle_explorer(),
+            OpenHelp => self.toggle_help(),
 
             SplitRight => self.split(Direction::Right),
             SplitLeft => self.split(Direction::Left),
@@ -1272,9 +1657,443 @@ impl App {
         }
     }
 
-    /// Open the settings panel, gathering the option lists once.
+    /// Set the sidebar width from a dragged right edge, in pixels.
+    ///
+    /// Stored in cells rather than pixels, so the sidebar keeps its proportions when
+    /// the font size changes instead of becoming a sliver or swallowing the window.
+    fn drag_sidebar(&mut self, edge_x: i32) {
+        let Some(frame) = self.frame.as_ref() else {
+            return;
+        };
+        let cell = self.cell_size().width.max(1) as i32;
+        let cells = ((edge_x - frame.sidebar.x) / cell).clamp(
+            tuz_config::EXPLORER_MIN_WIDTH as i32,
+            tuz_config::EXPLORER_MAX_WIDTH as i32,
+        ) as u16;
+
+        if cells == self.settings.config().explorer.width {
+            return;
+        }
+        // Through `modify` for the session only, not `save`: writing config.toml on
+        // every drag frame would rewrite the file dozens of times a second and trip
+        // its own watcher. The settings page is where it becomes permanent.
+        let actions = self.settings.modify(|c| c.explorer.width = cells);
+        self.apply_reload_actions(&actions);
+        self.request_redraw();
+    }
+
+    /// Open the current target in `ide`.
+    ///
+    /// The target is whatever the explorer has selected, falling back to the focused
+    /// shell's directory — pressing "VS Code" with nothing selected should open the
+    /// project you are standing in, not your home directory.
+    fn open_in_ide(&mut self, ide: crate::ide::Ide) {
+        let selected = self
+            .sidebar
+            .as_ref()
+            .and_then(|e| e.selected().map(|entry| entry.path.clone()));
+
+        let target = selected.unwrap_or_else(|| {
+            let cwd = self
+                .focused_session()
+                .and_then(|s| s.child_pid())
+                .and_then(crate::proc::working_directory);
+            crate::ide::fallback_target(cwd.as_deref())
+        });
+
+        let bytes = crate::ide::open_command(ide, &target);
+        if let Some(session) = self.focused_session() {
+            session.write(bytes);
+        } else {
+            self.notify(
+                "no shell to run the editor from".to_owned(),
+                tuz_plugin_api::NotifyLevel::Warn,
+            );
+        }
+        self.request_redraw();
+    }
+
+    /// A row was clicked: select it, and activate it if it was already selected.
+    ///
+    /// One click selects, a second activates. A single click that descended would make
+    /// the list impossible to browse with the mouse — every click would move you.
+    fn explorer_click(&mut self, id: tuz_ui::WidgetId) {
+        let Some(explorer) = self.sidebar.as_mut() else {
+            return;
+        };
+        let outcome = explorer.click_row(id);
+        self.handle_explorer_outcome(outcome);
+    }
+
+    /// Route one keystroke to the focused sidebar.
+    fn explorer_key(&mut self, chord: &tuz_input::KeyChord, event: &winit::event::KeyEvent) {
+        use tuz_input::{Key, NamedKey as N};
+
+        let plain =
+            !self.modifiers.control_key() && !self.modifiers.alt_key() && !self.modifiers.super_key();
+
+        // A prompt is modal within the sidebar: while one is open every key belongs to
+        // it, or typing a name would also be navigating the list underneath.
+        let prompting = self
+            .sidebar
+            .as_ref()
+            .map(|e| e.prompt().is_some())
+            .unwrap_or(false);
+
+        if prompting {
+            self.explorer_prompt_key(chord, event, plain);
+            return;
+        }
+
+        let Some(explorer) = self.sidebar.as_mut() else {
+            return;
+        };
+
+        let outcome = match chord.key {
+            Key::Named(N::Escape) => crate::explorer::ExplorerOutcome::Unfocus,
+            Key::Named(N::Up) => step(explorer.move_selection(-1)),
+            Key::Named(N::Down) => step(explorer.move_selection(1)),
+            Key::Named(N::PageUp) => step(explorer.move_selection(-10)),
+            Key::Named(N::PageDown) => step(explorer.move_selection(10)),
+            Key::Named(N::Home) => step(explorer.move_selection(i32::MIN / 2)),
+            Key::Named(N::End) => step(explorer.move_selection(i32::MAX / 2)),
+            Key::Named(N::Enter) => explorer.activate(),
+            Key::Named(N::Backspace) => step(explorer.go_up()),
+            Key::Char('r') if plain => step(explorer.begin_rename()),
+            Key::Char('n') if plain => {
+                explorer.begin_new_folder();
+                crate::explorer::ExplorerOutcome::Redraw
+            }
+            Key::Char('d') if plain => step(explorer.begin_delete()),
+            Key::Char('h') if plain => {
+                let show = !self.settings.config().explorer.show_hidden;
+                let actions = self.settings.modify(|c| c.explorer.show_hidden = show);
+                if let Some(e) = self.sidebar.as_mut() {
+                    e.set_show_hidden(show);
+                }
+                self.apply_reload_actions(&actions);
+                crate::explorer::ExplorerOutcome::Redraw
+            }
+            // The three actions that reach into the shell.
+            Key::Char('c') if plain => match explorer.selected() {
+                Some(entry) if entry.kind != tuz_ui::EntryKind::File => {
+                    crate::explorer::ExplorerOutcome::RunCd(entry.path.clone())
+                }
+                _ => crate::explorer::ExplorerOutcome::Continue,
+            },
+            Key::Char('e') if plain => match explorer.selected() {
+                Some(entry) => crate::explorer::ExplorerOutcome::OpenEditor(entry.path.clone()),
+                None => crate::explorer::ExplorerOutcome::Continue,
+            },
+            Key::Char('p') if plain => match explorer.selected() {
+                Some(entry) => crate::explorer::ExplorerOutcome::InsertPath(entry.path.clone()),
+                None => crate::explorer::ExplorerOutcome::Continue,
+            },
+            _ => crate::explorer::ExplorerOutcome::Continue,
+        };
+        self.handle_explorer_outcome(outcome);
+    }
+
+    /// Keys while a rename / new-folder / delete prompt is open.
+    fn explorer_prompt_key(
+        &mut self,
+        chord: &tuz_input::KeyChord,
+        event: &winit::event::KeyEvent,
+        plain: bool,
+    ) {
+        use tuz_input::{Key, NamedKey as N};
+
+        let confirming_delete = matches!(
+            self.sidebar.as_ref().and_then(|e| e.prompt()),
+            Some(crate::explorer::Prompt::Delete { .. })
+        );
+
+        let Some(explorer) = self.sidebar.as_mut() else {
+            return;
+        };
+
+        match chord.key {
+            Key::Named(N::Escape) => {
+                explorer.cancel_prompt();
+                self.request_redraw();
+            }
+            // A delete asks y/n rather than taking Enter, so the key that confirms a
+            // rename cannot also confirm a deletion by muscle memory.
+            Key::Char('y') if confirming_delete && plain => self.commit_explorer_prompt(),
+            Key::Char('n') if confirming_delete && plain => {
+                explorer.cancel_prompt();
+                self.request_redraw();
+            }
+            _ if confirming_delete => {}
+
+            Key::Named(N::Enter) => self.commit_explorer_prompt(),
+            Key::Named(N::Backspace) => {
+                explorer.prompt_backspace();
+                self.request_redraw();
+            }
+            _ => {
+                if plain {
+                    if let Some(text) = event.text.as_deref() {
+                        if explorer.prompt_input(text) {
+                            self.request_redraw();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn commit_explorer_prompt(&mut self) {
+        let Some(explorer) = self.sidebar.as_mut() else {
+            return;
+        };
+        match explorer.commit_prompt() {
+            Ok(_) => {}
+            // Never silent: a failed rename that just closed the prompt would look
+            // like it worked.
+            Err(message) => self.notify(message, tuz_plugin_api::NotifyLevel::Error),
+        }
+        self.request_redraw();
+    }
+
+    /// Open or close the new-tab dropdown.
+    ///
+    /// A separate chevron rather than a menu on the `+` itself: the common case is
+    /// wanting another tab of the shell you already use, and making that a two-step
+    /// gesture to serve the rare case would be the wrong trade.
+    fn toggle_new_tab_menu(&mut self) {
+        if self.menu.is_some() {
+            self.close_menu();
+            return;
+        }
+        let Some(anchor) = self
+            .frame
+            .as_ref()
+            .and_then(|f| {
+                f.actions
+                    .iter()
+                    .find(|(b, _)| *b == ChromeButton::NewTabMenu)
+                    .map(|(_, rect)| *rect)
+            })
+        else {
+            return;
+        };
+
+        let items: Vec<crate::menu::MenuItem> = crate::shells::available()
+            .into_iter()
+            .map(|shell| crate::menu::MenuItem {
+                label: shell.name.clone(),
+                value: shell.path.display().to_string(),
+            })
+            .collect();
+
+        if items.is_empty() {
+            // Nothing to choose between, so a menu would be an empty box. Fall back to
+            // what the button beside it does rather than showing nothing at all.
+            self.new_tab_with(None);
+            return;
+        }
+
+        self.menu = Some(crate::menu::Menu::new(anchor, items));
+        self.request_redraw();
+    }
+
+    /// Move the menu's selection to the row under the pointer.
+    ///
+    /// Hover and selection are the same thing here rather than two states: in a menu
+    /// you expect Enter to take whatever you are pointing at, and a separate hover
+    /// highlight would leave two rows looking chosen at once.
+    ///
+    /// A pointer outside the rows leaves the selection where it was, so drifting off
+    /// the edge on the way to a row does not lose your place.
+    fn update_menu_hover(&mut self, x: i32, y: i32) {
+        let cell_height = self.cell_size().height;
+        let Some(rect) = self.menu_rect else {
+            return;
+        };
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        let Some(index) = menu.row_at(rect, cell_height, x, y) else {
+            return;
+        };
+        if menu.selected != index {
+            menu.selected = index;
+            self.request_redraw();
+        }
+    }
+
+    fn move_menu(&mut self, delta: i32) {
+        if let Some(menu) = self.menu.as_mut() {
+            menu.move_selection(delta);
+            self.request_redraw();
+        }
+    }
+
+    /// Act on the highlighted row and close.
+    fn pick_menu_item(&mut self) {
+        let choice = self
+            .menu
+            .as_ref()
+            .and_then(|m| m.selected().map(|item| item.value.clone()));
+        self.close_menu();
+        if let Some(shell) = choice {
+            self.new_tab_with(Some(shell));
+        }
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu.take().is_some() {
+            self.menu_rect = None;
+            self.request_redraw();
+        }
+    }
+
+    /// Open a tab running `shell`, or the configured default when `None`.
+    fn new_tab_with(&mut self, shell: Option<String>) {
+        let pane = self.layout.new_tab();
+        self.pending_shell = shell;
+        self.ensure_session(pane);
+        self.pending_shell = None;
+        self.relayout();
+        self.request_redraw();
+    }
+
+    /// Open the shortcut reference, or return to it if it is already open.
+    ///
+    /// A tab rather than an overlay for the same reason settings is one: you want to
+    /// read it *while* trying the keys, which means switching away and back without
+    /// losing your place.
+    fn toggle_help(&mut self) {
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Help) {
+            if self.layout.active_kind() == TabKind::Help {
+                self.close_help();
+                return;
+            }
+            if self.layout.select_tab(index) {
+                self.relayout();
+            }
+            self.request_redraw();
+            return;
+        }
+        self.help = Some(crate::help::HelpPage::open());
+        self.layout.new_tab_of(TabKind::Help);
+        self.relayout();
+        self.request_redraw();
+    }
+
+    fn close_help(&mut self) {
+        self.help = None;
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Help) {
+            if let Some(panes) = self.layout.close_tab(index) {
+                for pane in panes {
+                    self.drop_session(pane);
+                }
+            }
+            if self.layout.is_empty() {
+                self.exit_requested = true;
+                return;
+            }
+            self.relayout();
+        }
+        self.request_redraw();
+    }
+
+    /// True when the reference is the tab on screen.
+    fn help_active(&self) -> bool {
+        self.help.is_some() && self.layout.active_kind() == TabKind::Help
+    }
+
+    /// Toggle the explorer sidebar.
+    ///
+    /// Opening also focuses it: you pressed a key to use it, not to look at it. Every
+    /// pane regrids, because the sidebar takes its width out of the pane body.
+    fn toggle_explorer(&mut self) {
+        if self.sidebar.is_some() {
+            self.sidebar = None;
+            self.sidebar_focused = false;
+        } else {
+            let dir = self.explorer_start_dir();
+            let show_hidden = self.settings.config().explorer.show_hidden;
+            self.sidebar = Some(crate::explorer::Explorer::open(dir, show_hidden));
+            self.sidebar_focused = true;
+        }
+        self.relayout();
+        self.request_redraw();
+    }
+
+    /// Where the explorer opens: the focused shell's directory, or `$HOME`.
+    ///
+    /// Read directly rather than through `self.cwd`, which is only populated when the
+    /// status bar is enabled and so cannot be relied on to be warm.
+    fn explorer_start_dir(&self) -> std::path::PathBuf {
+        self.focused_session()
+            .and_then(|s| s.child_pid())
+            .and_then(crate::proc::working_directory)
+            .or_else(crate::proc::home)
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+    }
+
+    /// Give the keyboard back to the terminal without closing the sidebar.
+    fn unfocus_explorer(&mut self) {
+        if self.sidebar_focused {
+            self.sidebar_focused = false;
+            self.request_redraw();
+        }
+    }
+
+    /// Act on what the explorer asked for.
+    fn handle_explorer_outcome(&mut self, outcome: crate::explorer::ExplorerOutcome) {
+        use crate::explorer::ExplorerOutcome as O;
+        match outcome {
+            O::Continue => {}
+            O::Redraw => self.request_redraw(),
+            O::Unfocus => self.unfocus_explorer(),
+
+            // A paste, not typing: bracketed paste tells the shell this is inserted
+            // text, and strips the terminator so the path cannot inject keystrokes.
+            O::InsertPath(path) => {
+                let text = crate::explorer::shell_quote(&path.to_string_lossy());
+                let mode = self.focused_mode();
+                if let Some(session) = self.focused_session() {
+                    session.write(tuz_core::encode_paste(&text, mode));
+                }
+                self.request_redraw();
+            }
+
+            // These two are meant to run, so they must NOT be bracketed — that is
+            // precisely the marker that tells a shell not to execute.
+            O::RunCd(dir) => {
+                let bytes = crate::explorer::cd_command(&dir);
+                if let Some(session) = self.focused_session() {
+                    session.write(bytes);
+                }
+                self.request_redraw();
+            }
+            O::OpenEditor(path) => {
+                let bytes = crate::explorer::editor_command(&path);
+                if let Some(session) = self.focused_session() {
+                    session.write(bytes);
+                }
+                // Hand the keyboard back: an editor you cannot type into is not open,
+                // and pressing Escape first to reach it would be a step nobody guesses.
+                self.unfocus_explorer();
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// Open the settings page, gathering the option lists once.
+    ///
+    /// Settings lives in a tab rather than an overlay, so opening it twice returns to
+    /// the tab already open — with its scroll position and unsaved edits intact —
+    /// rather than stacking a second copy or silently doing nothing.
     fn open_settings(&mut self) {
-        if self.panel.is_some() {
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Settings) {
+            if self.layout.select_tab(index) {
+                self.relayout();
+            }
+            self.request_redraw();
             return;
         }
         // Enumerating fonts is not free and the list cannot change while the panel is
@@ -1291,6 +2110,10 @@ impl App {
             families,
             themes,
         ));
+        // The tab gets a pane like any other so the layout code needs no special
+        // case, but no session is ever started for it, so nothing runs behind it.
+        self.layout.new_tab_of(TabKind::Settings);
+        self.relayout();
         self.request_redraw();
     }
 
@@ -1298,7 +2121,28 @@ impl App {
         // Closing keeps any unsaved changes for the session, matching how the
         // font-size keybindings already behave.
         self.panel = None;
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Settings) {
+            if let Some(panes) = self.layout.close_tab(index) {
+                for pane in panes {
+                    self.drop_session(pane);
+                }
+            }
+            if self.layout.is_empty() {
+                self.exit_requested = true;
+                return;
+            }
+            self.relayout();
+        }
         self.request_redraw();
+    }
+
+    /// True when the settings page is the tab currently shown.
+    ///
+    /// The page owns the keyboard and the pointer only while it is the visible tab:
+    /// switching to a terminal must hand both straight back, or the settings tab
+    /// would keep swallowing input from behind another tab.
+    fn settings_active(&self) -> bool {
+        self.panel.is_some() && self.layout.active_kind() == TabKind::Settings
     }
 
     /// Apply a panel action and rebuild whatever the config change requires.
@@ -1327,8 +2171,10 @@ impl App {
                 Err(e) => log::error!("could not save settings: {e}"),
             },
             PanelOutcome::Close => {
-                self.panel = None;
-                self.request_redraw();
+                // Closing the page means closing the tab that holds it. Dropping the
+                // panel alone left the tab in place, showing an empty page that no
+                // longer had a panel behind it to draw or click.
+                self.close_settings();
                 return;
             }
         }
@@ -1433,6 +2279,13 @@ impl App {
     /// resizable but nothing says so. Only changes on transitions, since setting the
     /// cursor on every motion event is a round trip to the compositor per pixel.
     fn update_resize_cursor(&mut self, x: i32, y: i32) {
+        // The sidebar's grip, when the window's own resize band does not claim it.
+        let on_grip = self
+            .frame
+            .as_ref()
+            .map(|f| f.sidebar.width > 0 && (x - f.sidebar.right()).abs() <= DIVIDER_GRAB as i32)
+            .unwrap_or(false);
+
         let icon = self.resize_edge(x, y).map(|d| match d {
             ResizeDirection::North => CursorIcon::NResize,
             ResizeDirection::South => CursorIcon::SResize,
@@ -1442,6 +2295,11 @@ impl App {
             ResizeDirection::NorthWest => CursorIcon::NwResize,
             ResizeDirection::SouthEast => CursorIcon::SeResize,
             ResizeDirection::SouthWest => CursorIcon::SwResize,
+        });
+        let icon = icon.or(if on_grip {
+            Some(CursorIcon::ColResize)
+        } else {
+            None
         });
         if icon == self.resize_cursor {
             return;
@@ -1493,10 +2351,13 @@ impl App {
 
     fn press_chrome_button(&mut self, button: ChromeButton) {
         match button {
+            ChromeButton::NewTabMenu => self.toggle_new_tab_menu(),
             ChromeButton::NewTab => {
                 self.dispatch(Action::NewTab);
             }
             ChromeButton::Settings => self.open_settings(),
+            ChromeButton::Explorer => self.toggle_explorer(),
+            ChromeButton::Help => self.toggle_help(),
             ChromeButton::SplitRight => self.split(Direction::Right),
             ChromeButton::SplitDown => self.split(Direction::Down),
             ChromeButton::Minimize => {
@@ -1648,9 +2509,73 @@ impl App {
             return;
         };
 
-        // While the panel is open it owns the keyboard. The binding that opened it
-        // still works, so the same chord toggles it shut.
-        if self.panel.is_some() {
+        // An open dropdown is modal: it is a small, deliberate choice, and letting
+        // keys through to whatever is behind it would make Escape the only safe key.
+        if self.menu.is_some() {
+            use tuz_input::{Key, NamedKey as N};
+            match chord.key {
+                Key::Named(N::Escape) => self.close_menu(),
+                Key::Named(N::Up) => self.move_menu(-1),
+                Key::Named(N::Down) => self.move_menu(1),
+                Key::Named(N::Home) => self.move_menu(i32::MIN / 2),
+                Key::Named(N::End) => self.move_menu(i32::MAX / 2),
+                Key::Named(N::Enter) | Key::Named(N::Space) => self.pick_menu_item(),
+                _ => self.close_menu(),
+            }
+            return;
+        }
+
+        // The reference page has nothing to edit or press, so it wants only two
+        // things: a way to scroll and a way to leave. Everything else is swallowed
+        // rather than reaching a shell that is not on screen.
+        if self.help_active() {
+            use tuz_input::{Key, NamedKey as N};
+            let scroll = match chord.key {
+                Key::Named(N::Escape) => {
+                    self.close_help();
+                    return;
+                }
+                Key::Named(N::Up) => -(self.cell_size().height as i32),
+                Key::Named(N::Down) => self.cell_size().height as i32,
+                Key::Named(N::PageUp) => -(self.cell_size().height as i32 * 10),
+                Key::Named(N::PageDown) => self.cell_size().height as i32 * 10,
+                Key::Named(N::Home) => i32::MIN / 2,
+                Key::Named(N::End) => i32::MAX / 2,
+                _ => {
+                    // The binding that opened it closes it, matching settings.
+                    if self.keymap.lookup(&chord) == Some(&Action::OpenHelp) {
+                        self.close_help();
+                    }
+                    return;
+                }
+            };
+            if let Some(page) = self.help.as_mut() {
+                if page.ui.scroll_by(scroll) {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
+        // The sidebar takes the keyboard only while focused — being open must not,
+        // because the whole point of a sidebar is looking at it while typing into the
+        // shell beside it. Checked before the keymap so its own keys win, but after
+        // nothing: the toggle binding is handled inside `explorer_key` so the chord
+        // that opened it still closes it.
+        if self.sidebar_focused && self.sidebar.is_some() {
+            if self.keymap.lookup(&chord) == Some(&Action::OpenExplorer) {
+                self.toggle_explorer();
+                return;
+            }
+            self.explorer_key(&chord, event);
+            // Anything else is swallowed rather than reaching the shell, so typing at
+            // the sidebar cannot run commands in the terminal behind it.
+            return;
+        }
+
+        // While the settings tab is the one on screen it owns the keyboard. The
+        // binding that opened it still works, so the same chord toggles it shut.
+        if self.settings_active() {
             if self.keymap.lookup(&chord) == Some(&Action::OpenSettings) {
                 self.close_settings();
                 return;
@@ -1776,6 +2701,10 @@ impl App {
         if !pressed {
             self.selecting = None;
             self.dragging = None;
+            self.dragging_sidebar = None;
+            if self.pressed_button.take().is_some() | self.pressed_ide.take().is_some() {
+                self.request_redraw();
+            }
             if let Some(drag) = self.dragging_tab.take() {
                 if drag.active && drag.current != drag.origin {
                     log::debug!("moved tab {} to {}", drag.origin, drag.current);
@@ -1784,50 +2713,107 @@ impl App {
             }
         }
 
-        // The panel is modal: a click inside it goes to a widget, and a click outside
-        // it dismisses, which is what every overlay does.
-        if self.panel.is_some() {
-            if !pressed {
+        // The resize band comes before everything, including the settings page. It
+        // runs along all four window edges, so whatever is drawn there — a tab, a
+        // pane, the settings footer — overlaps it, and anything that claims a click
+        // first takes the edge with it. The settings page did exactly that, and the
+        // bottom edge stopped resizing whenever settings was the open tab.
+        if pressed && button == MouseButton::Left {
+            if let Some(direction) = self.resize_edge(x, y) {
+                if let Some(w) = &self.window {
+                    if let Err(e) = w.drag_resize_window(direction) {
+                        log::debug!("compositor declined a resize drag: {e}");
+                    }
+                }
                 return;
             }
-            let inside = self
-                .panel
-                .as_ref()
-                .map(|p| {
-                    p.ui.hit(x, y).is_some() || p.ui.placed().iter().any(|w| w.rect.contains(x, y))
-                })
-                .unwrap_or(false);
+        }
 
-            if inside {
+        // An open dropdown takes the next click wherever it lands: inside, it picks;
+        // outside, it dismisses without the click doing anything else. Dismissing
+        // *and* acting would mean a click meant to close the menu also split a pane.
+        if pressed && self.menu.is_some() {
+            let hit = self.menu_rect.and_then(|rect| {
+                self.menu
+                    .as_ref()
+                    .and_then(|m| m.row_at(rect, self.cell_size().height, x, y))
+            });
+            match hit {
+                Some(index) => {
+                    if let Some(menu) = self.menu.as_mut() {
+                        menu.selected = index;
+                    }
+                    self.pick_menu_item();
+                }
+                None => self.close_menu(),
+            }
+            return;
+        }
+
+        // Ahead of the `is_chrome` branch below, which would otherwise read a press
+        // on the status bar as grabbing the title bar and start moving the window.
+        if pressed && button == MouseButton::Left {
+            if let Some(index) = self
+                .ide_hits
+                .iter()
+                .position(|(_, rect)| rect.contains(x, y))
+            {
+                let ide = self.ide_hits[index].0;
+                self.pressed_ide = Some(index);
+                self.open_in_ide(ide);
+                return;
+            }
+        }
+
+        // The grip is checked before the sidebar body, or the rightmost few pixels of
+        // the file list would never be draggable.
+        if pressed && button == MouseButton::Left && frame.sidebar.width > 0 {
+            let edge = frame.sidebar.right();
+            if (x - edge).abs() <= DIVIDER_GRAB as i32 && frame.sidebar.contains(x.min(edge - 1), y)
+            {
+                self.dragging_sidebar = Some(x - edge);
+                return;
+            }
+        }
+
+        // The sidebar claims its own column. This must come before the `is_chrome`
+        // branch below, which treats anything it matches as the draggable title bar.
+        if pressed && frame.sidebar.width > 0 && frame.sidebar.contains(x, y) {
+            self.sidebar_focused = true;
+            if let Some(tuz_ui::UiAction::Pressed(id)) =
+                self.sidebar.as_mut().and_then(|e| e.ui.click(x, y))
+            {
+                self.explorer_click(id);
+            }
+            self.request_redraw();
+            return;
+        }
+
+        // The settings page takes clicks that land on it, and only those. It fills a
+        // tab rather than floating over the window, so the strip above it must stay
+        // live — swallowing everything here would leave no way to click back to a
+        // terminal.
+        if self.settings_active() {
+            let page = frame.panes.first().map(|p| p.rect);
+            if page.is_some_and(|r| r.contains(x, y)) {
+                if !pressed {
+                    return;
+                }
                 if let Some(action) = self.panel.as_mut().and_then(|p| p.ui.click(x, y)) {
                     self.handle_panel_action(action);
                 } else {
                     self.request_redraw();
                 }
+                return;
             }
-            return;
         }
 
         if pressed {
-            // The resize band is checked before anything else, because it overlaps
-            // the tab strip along the top and the panes everywhere else. Losing a few
-            // pixels of tab to it is a fair trade for a window that can be resized at
-            // all — which, without decorations, it otherwise cannot be.
-            if button == MouseButton::Left {
-                if let Some(direction) = self.resize_edge(x, y) {
-                    if let Some(w) = &self.window {
-                        if let Err(e) = w.drag_resize_window(direction) {
-                            log::debug!("compositor declined a resize drag: {e}");
-                        }
-                    }
-                    return;
-                }
-            }
-
             // Buttons come before tabs: a close button sits inside its tab, so
             // checking the tab first would swallow the click.
             if let Some(button) = frame.action_at(x, y) {
                 log::debug!("chrome button: {}", button.describe());
+                self.pressed_button = Some(button);
                 self.press_chrome_button(button);
                 if self.exit_requested {
                     return;
@@ -1893,6 +2879,9 @@ impl App {
             }
             if let Some(pane) = frame.pane_at(x, y) {
                 self.layout.focus_pane(pane);
+                // Clicking into a terminal is the clearest possible statement that
+                // typing should go there.
+                self.unfocus_explorer();
             }
         }
 
@@ -1959,7 +2948,21 @@ impl App {
 
     fn on_mouse_move(&mut self, x: f64, y: f64) {
         self.mouse = (x, y);
+
+        // An open dropdown is modal, so nothing behind it should react to the pointer
+        // — including the window's resize cursor, which would otherwise change shape
+        // over a menu that has already claimed the next click.
+        if self.menu.is_some() {
+            self.update_menu_hover(x as i32, y as i32);
+            return;
+        }
+
         self.update_resize_cursor(x as i32, y as i32);
+
+        if let Some(offset) = self.dragging_sidebar {
+            self.drag_sidebar(x as i32 - offset);
+            return;
+        }
 
         // Hover state changes what is drawn, so it must request a redraw — but only
         // when it actually changes, or the window repaints continuously while the
@@ -2001,24 +3004,49 @@ impl App {
 
     /// Recompute what the pointer is over, reporting whether anything changed.
     fn update_hover(&mut self, x: i32, y: i32) -> bool {
+        // The settings page occupies a tab, not the whole window, so chrome hover
+        // stays live above it. Copied out so the frame borrow ends before the panel
+        // is borrowed mutably.
+        let page: Option<Rect> = (self.layout.active_kind() == TabKind::Settings)
+            .then(|| {
+                self.frame
+                    .as_ref()
+                    .and_then(|f| f.panes.first().map(|p| p.rect))
+            })
+            .flatten();
+
+        let mut changed = false;
         if let Some(panel) = self.panel.as_mut() {
-            // Chrome hover is meaningless while the panel covers it.
-            let mut changed = panel.ui.set_pointer(x, y);
-            changed |= self.hovered_button.take().is_some();
-            changed |= self.hovered_tab.take().is_some();
-            return changed;
+            // Outside the page the pointer belongs to the chrome, and the panel is
+            // told so explicitly — otherwise a row stays highlighted after the
+            // pointer has left the page entirely.
+            let (px, py) = match page {
+                Some(r) if r.contains(x, y) => (x, y),
+                _ => (i32::MIN, i32::MIN),
+            };
+            changed |= panel.ui.set_pointer(px, py);
         }
 
         let Some(frame) = self.frame.as_ref() else {
-            return false;
+            return changed;
         };
+
+        let ide = self
+            .ide_hits
+            .iter()
+            .position(|(_, rect)| rect.contains(x, y));
+        let ide_changed = ide != self.hovered_ide;
+        self.hovered_ide = ide;
 
         let button = frame.action_at(x, y);
         let tab = frame.tab_at(x, y);
         let close = frame.tab_close_at(x, y).is_some();
 
-        let changed =
-            button != self.hovered_button || tab != self.hovered_tab || close != self.hovered_close;
+        let changed = changed
+            || ide_changed
+            || button != self.hovered_button
+            || tab != self.hovered_tab
+            || close != self.hovered_close;
 
         self.hovered_button = button;
         self.hovered_tab = tab;
@@ -2094,6 +3122,44 @@ impl App {
     fn on_scroll(&mut self, delta: MouseScrollDelta) {
         // The panel owns the wheel while it is open, or scrolling over a settings
         // list would scroll the terminal hidden behind it.
+        // The sidebar scrolls when the pointer is over it, whatever has focus —
+        // scrolling is a pointer gesture, not a keyboard one.
+        if self.help_active() {
+            let cell_height = self.cell_size().height as f32;
+            let pixels = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -(y * 3.0 * cell_height),
+                MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+            };
+            if let Some(page) = self.help.as_mut() {
+                if page.ui.scroll_by(pixels as i32) {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
+        let over_sidebar = self
+            .frame
+            .as_ref()
+            .map(|f| {
+                f.sidebar.width > 0
+                    && f.sidebar.contains(self.mouse.0 as i32, self.mouse.1 as i32)
+            })
+            .unwrap_or(false);
+        if over_sidebar {
+            let cell_height = self.cell_size().height as f32;
+            let pixels = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -(y * 3.0 * cell_height),
+                MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+            };
+            if let Some(explorer) = self.sidebar.as_mut() {
+                if explorer.ui.scroll_by(pixels as i32) {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
         if self.panel.is_some() {
             let cell_height = self.cell_size().height.max(1) as f64;
             let lines = match delta {
@@ -2400,8 +3466,19 @@ impl ApplicationHandler<UserEvent> for App {
         let height =
             cfg.window.rows as u32 * BOOTSTRAP_CELL.height + cfg.window.padding.y as u32 * 2;
 
+        // Wayland takes the icon from the `.desktop` file rather than the window, so
+        // this is what X11 and the app switcher use; `assets/tuzminal.desktop` covers
+        // the Wayland case.
+        let icon = {
+            let (pixels, size) = crate::appicon::rgba();
+            winit::window::Icon::from_rgba(pixels, size, size)
+                .map_err(|e| log::debug!("could not build the window icon: {e}"))
+                .ok()
+        };
+
         let attrs = Window::default_attributes()
             .with_title(&cfg.window.title)
+            .with_window_icon(icon)
             .with_decorations(cfg.window.decorations)
             // Rounded corners need an alpha channel just as much as opacity does:
             // the corner pixels are transparent, and on an opaque surface they would
@@ -2456,6 +3533,16 @@ impl ApplicationHandler<UserEvent> for App {
         self.relayout();
         let first = self.layout.active_pane();
         self.ensure_session(first);
+
+        // Honour the config key, but do not take the keyboard: a sidebar that is open
+        // because it was configured that way is not one you just asked for, and the
+        // first thing anyone does in a terminal is type.
+        if self.settings.config().explorer.enabled {
+            let dir = self.explorer_start_dir();
+            let show_hidden = self.settings.config().explorer.show_hidden;
+            self.sidebar = Some(crate::explorer::Explorer::open(dir, show_hidden));
+        }
+
         self.relayout();
         self.request_redraw();
     }
@@ -2551,6 +3638,39 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Which window edge or corner a point falls in, for a window of `width` x `height`.
+///
+/// Split out from `App` so the geometry can be tested without a window: it decides
+/// whether a borderless window can be resized at all, and the corners in particular
+/// are easy to get subtly wrong.
+fn resize_edge_at(x: i32, y: i32, width: i32, height: i32) -> Option<ResizeDirection> {
+    let left = x <= RESIZE_BORDER;
+    let right = x >= width - RESIZE_BORDER;
+    let top = y <= RESIZE_BORDER;
+    let bottom = y >= height - RESIZE_BORDER;
+
+    Some(match (top, bottom, left, right) {
+        (true, _, true, _) => ResizeDirection::NorthWest,
+        (true, _, _, true) => ResizeDirection::NorthEast,
+        (_, true, true, _) => ResizeDirection::SouthWest,
+        (_, true, _, true) => ResizeDirection::SouthEast,
+        (true, ..) => ResizeDirection::North,
+        (_, true, ..) => ResizeDirection::South,
+        (_, _, true, _) => ResizeDirection::West,
+        (_, _, _, true) => ResizeDirection::East,
+        _ => return None,
+    })
+}
+
+/// A selection move that did nothing is not worth a frame.
+fn step(moved: bool) -> crate::explorer::ExplorerOutcome {
+    if moved {
+        crate::explorer::ExplorerOutcome::Redraw
+    } else {
+        crate::explorer::ExplorerOutcome::Continue
+    }
+}
+
 /// Build the keymap from config plus whatever plugins registered.
 ///
 /// Plugin bindings are applied first so a user's config can override them; the
@@ -2574,4 +3694,46 @@ fn build_keymap(settings: &ConfigManager, plugins: &PluginHost) -> Keymap {
     }
     log::debug!("{} keybindings active", built.keymap.len());
     built.keymap
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    const W: i32 = 800;
+    const H: i32 = 600;
+
+    #[test]
+    fn each_edge_and_corner_reports_its_own_direction() {
+        use ResizeDirection::*;
+        let cases = [
+            ((0, 0), Some(NorthWest)),
+            ((W - 1, 0), Some(NorthEast)),
+            ((0, H - 1), Some(SouthWest)),
+            ((W - 1, H - 1), Some(SouthEast)),
+            ((W / 2, 0), Some(North)),
+            ((W / 2, H - 1), Some(South)),
+            ((0, H / 2), Some(West)),
+            ((W - 1, H / 2), Some(East)),
+            ((W / 2, H / 2), None),
+        ];
+        for ((x, y), want) in cases {
+            assert_eq!(
+                resize_edge_at(x, y, W, H),
+                want,
+                "({x}, {y}) should resolve to {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bottom_band_is_live_and_just_inside_it_is_not() {
+        // The band along the bottom is what the settings page used to swallow, which
+        // left the window unresizable from that edge whenever settings was open.
+        assert_eq!(
+            resize_edge_at(W / 2, H - RESIZE_BORDER, W, H),
+            Some(ResizeDirection::South)
+        );
+        assert_eq!(resize_edge_at(W / 2, H - RESIZE_BORDER - 1, W, H), None);
+    }
 }

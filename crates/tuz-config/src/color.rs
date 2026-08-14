@@ -37,6 +37,14 @@ impl Rgba {
     /// The leading `#` or `0x` is required — a bare `ff0000` is far more likely
     /// to be a mistake than an intentional color, so we reject it rather than
     /// silently guessing.
+    /// `#rrggbb`, the form [`parse`](Self::parse) accepts and status segments carry.
+    ///
+    /// Round-trips through `parse`, which is what makes it usable as an override in a
+    /// `StatusItem` rather than only for display.
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+    }
+
     pub fn parse(s: &str) -> Result<Self, ColorParseError> {
         let hex = s
             .strip_prefix('#')
@@ -146,6 +154,19 @@ impl Serialize for Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_round_trips_through_parse() {
+        for color in [
+            Rgba::rgb(0, 0, 0),
+            Rgba::rgb(255, 255, 255),
+            Rgba::rgb(0x5c, 0xf0, 0xd4),
+            Rgba::rgb(1, 2, 3),
+        ] {
+            let hex = color.to_hex();
+            assert_eq!(Rgba::parse(&hex).unwrap(), color, "{hex}");
+        }
+    }
 
     #[test]
     fn parses_all_accepted_forms() {

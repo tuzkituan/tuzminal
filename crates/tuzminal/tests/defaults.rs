@@ -114,6 +114,27 @@ fn the_example_config_documents_only_real_actions() {
 /// launch had **no visible controls at all** — which is precisely the problem the
 /// buttons were added to solve. Keyboard shortcuts still worked, so nothing was
 /// broken enough to fail a test; it was just invisible.
+/// The settings page has no terminal behind it, so the status bar has nothing true
+/// to say there — every built-in segment reports on a pane that is not on screen.
+#[test]
+fn the_status_bar_is_hidden_on_the_settings_tab() {
+    use tuz_layout::{Layout, TabKind};
+
+    let (mut layout, _) = Layout::new();
+    assert_eq!(layout.active_kind(), TabKind::Terminal);
+
+    layout.new_tab_of(TabKind::Settings);
+    assert_eq!(
+        layout.active_kind(),
+        TabKind::Settings,
+        "the strip's height keys off this, so it must follow the active tab"
+    );
+
+    // Switching back has to restore it, or the bar would vanish for the session.
+    layout.select_tab(0);
+    assert_eq!(layout.active_kind(), TabKind::Terminal);
+}
+
 #[test]
 fn a_default_config_shows_the_tab_strip_so_the_buttons_are_reachable() {
     let config = Config::default();
