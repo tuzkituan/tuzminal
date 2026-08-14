@@ -25,11 +25,15 @@ STAGE="${DIST}/${NAME}"
 echo "==> building ${NAME}"
 cargo build --release --locked
 
+# Stripped in place, before anything is packaged. The release profile keeps debug
+# symbols on purpose so perf profiles stay readable; a download should not carry
+# them, and both package builders read this same path.
+strip target/release/tuzminal 2>/dev/null || echo "    (strip unavailable)"
+
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/share"
 
 cp target/release/tuzminal "${STAGE}/tuzminal"
-strip "${STAGE}/tuzminal" 2>/dev/null || echo "    (strip unavailable; shipping unstripped)"
 
 cp README.md LICENSE-MIT LICENSE-APACHE "${STAGE}/"
 cp docs/PLUGINS.md "${STAGE}/share/"
@@ -95,7 +99,38 @@ tar -czf "${DIST}/${NAME}.tar.gz" -C "${DIST}" "${NAME}"
 # to find.
 ( cd "${DIST}" && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
 
+# --- native packages -------------------------------------------------------
+#
+# Skipped rather than fatal when the builders are absent: the tarball is the
+# portable artifact and should not fail to build because a distro package cannot.
+
+if command -v cargo-generate-rpm >/dev/null; then
+  echo "==> rpm"
+  rm -rf target/generate-rpm
+  cargo generate-rpm -p crates/tuzminal >/dev/null
+  cp target/generate-rpm/*.rpm "${DIST}/"
+else
+  echo "==> rpm skipped (cargo install cargo-generate-rpm)"
+fi
+
+if command -v cargo-deb >/dev/null; then
+  echo "==> deb"
+  rm -rf target/debian
+  # --no-build: the binary is already built and stripped above. Letting cargo-deb
+  # rebuild would restore the debug symbols this script just removed.
+  cargo deb -p tuzminal --no-build 2>/dev/null >/dev/null
+  cp target/debian/*.deb "${DIST}/"
+else
+  echo "==> deb skipped (cargo install cargo-deb)"
+fi
+
+( cd "${DIST}" && sha256sum *.rpm *.deb 2>/dev/null > SHA256SUMS.txt || true )
+if [ -s "${DIST}/SHA256SUMS.txt" ]; then
+  cat "${DIST}/${NAME}.tar.gz.sha256" >> "${DIST}/SHA256SUMS.txt"
+fi
+
 echo
-echo "  ${DIST}/${NAME}.tar.gz"
-ls -lh "${DIST}/${NAME}.tar.gz" | awk '{print "  size: " $5}'
-cat "${DIST}/${NAME}.tar.gz.sha256" | awk '{print "  sha256: " $1}'
+echo "Artifacts in ${DIST}/:"
+for f in "${DIST}"/*.tar.gz "${DIST}"/*.rpm "${DIST}"/*.deb; do
+  [ -f "$f" ] && printf "  %-46s %s\n" "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+done

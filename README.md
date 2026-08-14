@@ -17,70 +17,60 @@ abstracted so macOS and Windows are a port rather than a rewrite.
 
 ## Install
 
-### Dependencies
+Download a package from the [latest release](https://github.com/tuzkituan/tuzminal/releases)
+and install it. **No Rust toolchain, no compiling.**
 
-You need Rust 1.85 or newer, plus the Wayland/X11 and font development packages.
+### Fedora, RHEL, openSUSE
+
+```bash
+sudo dnf install ./tuzminal-0.1.0-1.x86_64.rpm
+```
+
+### Debian, Ubuntu, Mint, Pop!_OS
+
+```bash
+sudo apt install ./tuzminal_0.1.0-1_amd64.deb
+```
+
+### Any other Linux
+
+A portable archive that installs for your user only, needing no root:
+
+```bash
+tar -xzf tuzminal-0.1.0-x86_64-linux.tar.gz
+cd tuzminal-0.1.0-x86_64-linux
+./install.sh
+```
+
+Then launch it from your applications menu, or run `tuzminal`.
+
+The `.rpm` and `.deb` register the desktop entry for you. The archive's
+`install.sh` puts the binary in `~/.local/bin` and registers it there; if your
+shell cannot find `tuzminal` afterwards, that directory is not on your `PATH`.
+
+### Verifying a download
+
+Every release ships `SHA256SUMS.txt`:
+
+```bash
+sha256sum -c SHA256SUMS.txt --ignore-missing
+```
+
+### Building from source instead
+
+Only if you want to. You need Rust 1.85+ and the development headers:
 
 ```bash
 # Fedora
 sudo dnf install wayland-devel libxkbcommon-devel fontconfig-devel libX11-devel
-
 # Debian / Ubuntu
 sudo apt install libwayland-dev libxkbcommon-dev libfontconfig-1-dev libx11-dev
 
-# Arch
-sudo pacman -S wayland libxkbcommon fontconfig libx11
-```
-
-### From a release archive
-
-No Rust toolchain needed. Download the archive for your platform, then:
-
-```bash
-tar -xzf tuzminal-*-x86_64-linux.tar.gz
-cd tuzminal-*-x86_64-linux
-./install.sh
-```
-
-That puts the binary in `~/.local/bin` and registers the desktop entry. Verify the
-download first if you like — each archive ships with a `.sha256` beside it:
-
-```bash
-sha256sum -c tuzminal-*.tar.gz.sha256
-```
-
-### From source
-
-```bash
 git clone https://github.com/tuzkituan/tuzminal
 cd tuzminal
 cargo install --path crates/tuzminal --locked
+tuzminal --install-desktop-entry    # add it to the applications list
 ```
-
-That puts `tuzminal` in `~/.cargo/bin`. If your shell cannot find it, that
-directory is not on your `PATH` — `source ~/.cargo/env` fixes the current shell,
-and the Rust installer normally adds it to your shell profile.
-
-### Add it to your applications list
-
-`cargo install` only installs a binary, so the terminal will not appear in your
-desktop's app grid until you ask for it:
-
-```bash
-tuzminal --install-desktop-entry
-```
-
-This writes two files and prints where they went:
-
-| File | Purpose |
-|---|---|
-| `~/.local/share/applications/tuzminal.desktop` | the menu entry |
-| `~/.local/share/icons/hicolor/scalable/apps/tuzminal.svg` | the icon |
-
-Some desktops pick it up immediately; others need a log out and back in. The entry
-records the **absolute** path to the binary, because a desktop launcher runs with
-the session's environment, which usually does not include `~/.cargo/bin`. Re-run
-the command after moving or reinstalling the binary.
 
 ### Set it as your default terminal
 
@@ -90,37 +80,26 @@ GNOME:
 gsettings set org.gnome.desktop.default-applications.terminal exec tuzminal
 ```
 
----
-
 ## Uninstall
 
-If you installed from an archive, it came with an uninstaller:
-
 ```bash
-./uninstall.sh            # the program
-./uninstall.sh --purge    # and your settings, themes and plugins
+sudo dnf remove tuzminal          # Fedora
+sudo apt remove tuzminal          # Debian / Ubuntu
+./uninstall.sh                    # if you used the archive
+cargo uninstall tuzminal          # if you built from source
 ```
 
-If you installed from source:
+Removing the package leaves your settings, themes and plugins alone. To remove
+those too:
 
 ```bash
-cargo uninstall tuzminal
-rm -f ~/.local/share/applications/tuzminal.desktop
-rm -f ~/.local/share/icons/hicolor/scalable/apps/tuzminal.svg
+rm -rf ~/.config/tuzminal         # config, your themes, your plugins
+rm -rf ~/.local/share/tuzminal    # installed themes and plugins
 ```
 
-That removes the program. Your settings, themes and plugins are left alone; to
-remove those too:
-
-```bash
-rm -rf ~/.config/tuzminal    # config, your themes, your plugins
-rm -rf ~/.local/share/tuzminal   # installed themes and plugins
-```
-
-Nothing else is written anywhere. There is no daemon, no autostart entry, and no
-files outside those four locations.
-
----
+The archive's uninstaller does both with `./uninstall.sh --purge`. Nothing is
+written anywhere outside those two directories, the binary, and the desktop entry
+and icon.
 
 ## Using it
 
@@ -216,14 +195,16 @@ before writing anything, and says plainly that Lua plugins are not sandboxed.
 
 ## Troubleshooting
 
-**It is not in my applications list.** Run `tuzminal --install-desktop-entry`. Some
-desktops need a log out and back in.
+**It is not in my applications list.** The `.rpm` and `.deb` register it for you; if
+you built from source or the entry went missing, run `tuzminal
+--install-desktop-entry`. Some desktops need a log out and back in.
 
 **The launcher does nothing.** The entry points at the binary's absolute path; if
 you moved or reinstalled it, run `--install-desktop-entry` again.
 
-**`tuzminal: command not found`.** `~/.cargo/bin` is not on your `PATH`. Run
-`source ~/.cargo/env`, or add it to your shell profile.
+**`tuzminal: command not found`.** If you used the archive, `~/.local/bin` is not on
+your `PATH`; if you built from source, `~/.cargo/bin` is not (`source ~/.cargo/env`
+fixes the current shell). Add the directory to your shell profile either way.
 
 **Blank squares instead of prompt symbols.** Install a Nerd Font and set it in
 `config.toml`. Tuzminal searches every installed font for missing characters, so a
@@ -322,11 +303,24 @@ cargo bench --workspace --features tuz-core/test-util   # VT parser throughput
 ./scripts/package.sh                                    # a release archive in dist/
 ```
 
-`package.sh` strips the binary, which takes it from 167 MB to 25 MB — the release
-profile keeps debug symbols on purpose so perf profiles stay readable, and a
-download should not carry them. The archive holds the binary, the desktop entry and
-icon, the plugin guide, the example plugins, both licences, and install/uninstall
-scripts.
+`package.sh` produces all three artifacts in `dist/`: an `.rpm`, a `.deb`, and a
+portable `.tar.gz`. It strips the binary first, which takes it from 167 MB to
+25 MB — the release profile keeps debug symbols on purpose so perf profiles stay
+readable, and a download should not carry them.
+
+The `.rpm` and `.deb` need two cargo plugins, and are skipped with a note if absent
+rather than failing the build:
+
+```bash
+cargo install cargo-deb cargo-generate-rpm
+```
+
+**Package dependencies are listed by hand, not detected.** Every windowing library
+is `dlopen`ed by `winit` and `wgpu` at runtime rather than linked, so the binary's
+ELF header names only libc, libm and libgcc — `dpkg-shlibdeps` and `auto-req` both
+find nothing, and an auto-generated package would install happily onto a system it
+cannot run on. Vulkan is a *recommendation* rather than a requirement, because
+there is a working GL backend behind `performance.gpu_backend = "gl"`.
 
 CI builds and tests Linux, macOS and Windows on every push, plus clippy, rustfmt and
 `cargo audit`.
