@@ -19,8 +19,11 @@ struct Uniforms {
 // Flag bits, mirrored in instance.rs.
 const FLAG_TEXTURED: u32 = 1u;
 const FLAG_COLOR_GLYPH: u32 = 2u;
-const FLAG_ROUND_TOP: u32 = 4u;
-const FLAG_ROUND_BOTTOM: u32 = 8u;
+const FLAG_ROUND_TL: u32 = 4u;
+const FLAG_ROUND_TR: u32 = 8u;
+const FLAG_ROUND_BL: u32 = 16u;
+const FLAG_ROUND_BR: u32 = 32u;
+const FLAG_ROUND_ANY: u32 = 60u;
 
 struct Instance {
     @location(0) position: vec2<f32>,
@@ -29,6 +32,7 @@ struct Instance {
     @location(3) color: vec4<f32>,
     @location(4) flags: u32,
     @location(5) corner_radius: f32,
+    @location(6) rotation: f32,
 };
 
 struct VertexOutput {
@@ -60,7 +64,19 @@ fn vs_main(
     instance: Instance,
 ) -> VertexOutput {
     let unit = corner(vertex_index);
-    let pixel = instance.position + unit * instance.size;
+
+    // Rotation is about the quad's own center, so a rotated icon stroke stays where
+    // it was placed instead of swinging away from the origin. Zero rotation reduces
+    // to the identity, which is every terminal cell.
+    let half = instance.size * 0.5;
+    let from_center = (unit - vec2<f32>(0.5, 0.5)) * instance.size;
+    let c = cos(instance.rotation);
+    let s = sin(instance.rotation);
+    let turned = vec2<f32>(
+        from_center.x * c - from_center.y * s,
+        from_center.x * s + from_center.y * c,
+    );
+    let pixel = instance.position + half + turned;
 
     // Pixels to clip space. Y is flipped because pixel space grows downward
     // while clip space grows upward.
@@ -86,20 +102,24 @@ fn vs_main(
 /// flush against the content below. Returns 1.0 everywhere when no corner is
 /// selected, which is the overwhelmingly common case — every terminal cell.
 fn rounded_coverage(local: vec2<f32>, size: vec2<f32>, radius: f32, flags: u32) -> f32 {
-    let round_top = (flags & FLAG_ROUND_TOP) != 0u;
-    let round_bottom = (flags & FLAG_ROUND_BOTTOM) != 0u;
-    if (!round_top && !round_bottom) || radius <= 0.0 {
+    if (flags & FLAG_ROUND_ANY) == 0u || radius <= 0.0 {
         return 1.0;
     }
 
-    // Only the selected half is pulled in; the other keeps square corners, which is
-    // what makes a top-rounded strip meet the pane below with no seam.
-    let top_r = select(0.0, radius, round_top);
-    let bottom_r = select(0.0, radius, round_bottom);
-    let r = select(bottom_r, top_r, local.y < size.y * 0.5);
-    if r <= 0.0 {
+    // Each corner is selected independently, so a shape can round only where it meets
+    // the outside of the window: the first tab rounds its top-left to sit in the
+    // window's corner, while its other three stay square against its neighbours.
+    let left = local.x < size.x * 0.5;
+    let top = local.y < size.y * 0.5;
+    var bit = FLAG_ROUND_BR;
+    if (top && left) { bit = FLAG_ROUND_TL; }
+    else if (top) { bit = FLAG_ROUND_TR; }
+    else if (left) { bit = FLAG_ROUND_BL; }
+
+    if (flags & bit) == 0u {
         return 1.0;
     }
+    let r = radius;
 
     // Standard rounded-box signed distance: distance from the inner rect inset by r.
     let half = size * 0.5;

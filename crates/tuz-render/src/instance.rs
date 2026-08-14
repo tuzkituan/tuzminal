@@ -16,10 +16,18 @@ use tuz_font::{CellMetrics, FontSystem, Style};
 pub const FLAG_TEXTURED: u32 = 1;
 /// The glyph carries its own color (emoji) and must not be tinted.
 pub const FLAG_COLOR_GLYPH: u32 = 2;
-/// Round the two top corners by `corner_radius`.
-pub const FLAG_ROUND_TOP: u32 = 4;
-/// Round the two bottom corners by `corner_radius`.
-pub const FLAG_ROUND_BOTTOM: u32 = 8;
+/// Round the top-left corner by `corner_radius`.
+pub const FLAG_ROUND_TL: u32 = 4;
+/// Round the top-right corner by `corner_radius`.
+pub const FLAG_ROUND_TR: u32 = 8;
+/// Round the bottom-left corner by `corner_radius`.
+pub const FLAG_ROUND_BL: u32 = 16;
+/// Round the bottom-right corner by `corner_radius`.
+pub const FLAG_ROUND_BR: u32 = 32;
+/// Both top corners.
+pub const FLAG_ROUND_TOP: u32 = FLAG_ROUND_TL | FLAG_ROUND_TR;
+/// Both bottom corners.
+pub const FLAG_ROUND_BOTTOM: u32 = FLAG_ROUND_BL | FLAG_ROUND_BR;
 
 /// One quad. Field order and padding must match `cell.wgsl`.
 #[repr(C)]
@@ -38,8 +46,14 @@ pub struct Instance {
     /// Fits in what used to be padding, so the instance stays 64 bytes and the
     /// vertex stride is unchanged.
     pub corner_radius: f32,
+    /// Rotation about the quad's center, in radians.
+    ///
+    /// Exists so chrome icons can be drawn from geometry rather than font glyphs:
+    /// without it there is no way to draw the diagonal strokes of a close cross or
+    /// the teeth of a gear out of axis-aligned quads.
+    pub rotation: f32,
     /// Explicit padding to a 16-byte boundary, required by the vertex layout.
-    pub _padding: [u32; 2],
+    pub _padding: [u32; 1],
 }
 
 impl Instance {
@@ -52,7 +66,8 @@ impl Instance {
             color,
             flags: 0,
             corner_radius: 0.0,
-            _padding: [0; 2],
+            rotation: 0.0,
+            _padding: [0; 1],
         }
     }
 
@@ -73,7 +88,8 @@ impl Instance {
             color,
             flags: FLAG_TEXTURED | if color_glyph { FLAG_COLOR_GLYPH } else { 0 },
             corner_radius: 0.0,
-            _padding: [0; 2],
+            rotation: 0.0,
+            _padding: [0; 1],
         }
     }
 
@@ -99,19 +115,56 @@ impl Instance {
             // Never more than half the shorter side, or opposite corners overlap and
             // the shape inverts.
             corner_radius: radius.min(width.min(height) / 2.0).max(0.0),
-            _padding: [0; 2],
+            rotation: 0.0,
+            _padding: [0; 1],
         }
+    }
+
+    /// A solid rectangle turned about its own center.
+    pub fn rotated(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [f32; 4],
+        radians: f32,
+    ) -> Self {
+        Self {
+            position: [x, y],
+            size: [width, height],
+            uv: [0.0; 4],
+            color,
+            flags: 0,
+            corner_radius: 0.0,
+            rotation: radians,
+            _padding: [0; 1],
+        }
+    }
+
+    /// A filled circle, as a square pulled in to a radius of half its side.
+    pub fn circle(center_x: f32, center_y: f32, radius: f32, color: [f32; 4]) -> Self {
+        let d = radius * 2.0;
+        Self::rounded(
+            center_x - radius,
+            center_y - radius,
+            d,
+            d,
+            color,
+            radius,
+            FLAG_ROUND_TOP | FLAG_ROUND_BOTTOM,
+        )
     }
 
     /// The vertex buffer layout matching this struct.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
             0 => Float32x2, // position
             1 => Float32x2, // size
             2 => Float32x4, // uv
             3 => Float32x4, // color
             4 => Uint32,    // flags
             5 => Float32,   // corner_radius
+            6 => Float32,   // rotation
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,

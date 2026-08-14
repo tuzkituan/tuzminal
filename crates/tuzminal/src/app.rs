@@ -44,7 +44,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 /// A message shown briefly over the terminal.
 struct Notification {
@@ -90,6 +90,11 @@ const DIVIDER_GRAB: u32 = 4;
 
 /// Vertical inset inside the tab and status strips.
 const CHROME_PADDING: u32 = 9;
+
+/// Width of the invisible band along each window edge that resizes instead of
+/// selecting. Only exists without decorations, where the compositor draws no frame
+/// of its own and a borderless window would otherwise be stuck at one size.
+const RESIZE_BORDER: i32 = 6;
 
 /// How close together two title-bar presses must be to count as a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -149,6 +154,8 @@ pub struct App {
     hovered_button: Option<ChromeButton>,
     /// When and where the title bar was last pressed, for double-click detection.
     last_title_click: Option<(Instant, i32, i32)>,
+    /// Resize cursor currently set, so it is only pushed to the compositor on change.
+    resize_cursor: Option<CursorIcon>,
     /// The tab under the pointer, so only that tab shows a close button.
     hovered_tab: Option<usize>,
     /// True when the pointer is over the hovered tab's close button.
@@ -275,6 +282,7 @@ impl App {
             dragging: None,
             hovered_button: None,
             last_title_click: None,
+            resize_cursor: None,
             hovered_tab: None,
             hovered_close: false,
             panel: None,
@@ -351,6 +359,41 @@ impl App {
 
     /// Buttons for the tab strip, in right-to-left order.
     ///
+    /// Which window edge or corner the pointer is over, if any.
+    ///
+    /// Returns `None` with decorations on (the compositor's own frame handles it) and
+    /// while maximized (there is nothing to drag a maximized window's edge to).
+    fn resize_edge(&self, x: i32, y: i32) -> Option<ResizeDirection> {
+        if self.settings.config().window.decorations {
+            return None;
+        }
+        let Some(w) = &self.window else {
+            return None;
+        };
+        if w.is_maximized() {
+            return None;
+        }
+        let size = w.inner_size();
+        let (width, height) = (size.width as i32, size.height as i32);
+
+        let left = x <= RESIZE_BORDER;
+        let right = x >= width - RESIZE_BORDER;
+        let top = y <= RESIZE_BORDER;
+        let bottom = y >= height - RESIZE_BORDER;
+
+        Some(match (top, bottom, left, right) {
+            (true, _, true, _) => ResizeDirection::NorthWest,
+            (true, _, _, true) => ResizeDirection::NorthEast,
+            (_, true, true, _) => ResizeDirection::SouthWest,
+            (_, true, _, true) => ResizeDirection::SouthEast,
+            (true, ..) => ResizeDirection::North,
+            (_, true, ..) => ResizeDirection::South,
+            (_, _, true, _) => ResizeDirection::West,
+            (_, _, _, true) => ResizeDirection::East,
+            _ => return None,
+        })
+    }
+
     /// The corner radius actually in effect.
     ///
     /// Zero with decorations on: the compositor owns the window's outline then, and
@@ -755,11 +798,12 @@ impl App {
 
             tuz_render::chrome::draw_chrome_buttons(
                 instances,
-                fonts,
+                frame.tab_bar,
                 &frame.actions,
                 hovered_button,
                 theme,
                 colors,
+                radius,
             );
 
             // After the strip, so it overlaps the tabs below rather than being
@@ -1304,6 +1348,18 @@ impl App {
         if actions.rebuild_fonts {
             self.rebuild_fonts();
         }
+        if actions.reload_theme {
+            // Everything reads the palette through `settings.theme()`, so without
+            // this the name changes and not one color does — which is exactly how
+            // picking a theme in the panel appeared to do nothing.
+            if let Err(e) = self.settings.reload_theme() {
+                log::error!("could not load theme: {e}");
+                self.notify(
+                    format!("theme failed to load: {e}"),
+                    tuz_plugin_api::NotifyLevel::Error,
+                );
+            }
+        }
         if actions.resize_scrollback {
             let lines = self.settings.config().scrollback.lines;
             for session in self.sessions.values() {
@@ -1371,6 +1427,31 @@ impl App {
     }
 
     /// Act on a tab strip button.
+    /// Point the cursor at whichever edge would be dragged from here.
+    ///
+    /// Without this the resize band is invisible and undiscoverable: the window is
+    /// resizable but nothing says so. Only changes on transitions, since setting the
+    /// cursor on every motion event is a round trip to the compositor per pixel.
+    fn update_resize_cursor(&mut self, x: i32, y: i32) {
+        let icon = self.resize_edge(x, y).map(|d| match d {
+            ResizeDirection::North => CursorIcon::NResize,
+            ResizeDirection::South => CursorIcon::SResize,
+            ResizeDirection::East => CursorIcon::EResize,
+            ResizeDirection::West => CursorIcon::WResize,
+            ResizeDirection::NorthEast => CursorIcon::NeResize,
+            ResizeDirection::NorthWest => CursorIcon::NwResize,
+            ResizeDirection::SouthEast => CursorIcon::SeResize,
+            ResizeDirection::SouthWest => CursorIcon::SwResize,
+        });
+        if icon == self.resize_cursor {
+            return;
+        }
+        self.resize_cursor = icon;
+        if let Some(w) = &self.window {
+            w.set_cursor(icon.unwrap_or(CursorIcon::Default));
+        }
+    }
+
     /// Handle a left press on the empty stretch of the title bar.
     ///
     /// A second press within [`DOUBLE_CLICK`] and a few pixels toggles maximize;
@@ -1728,6 +1809,21 @@ impl App {
         }
 
         if pressed {
+            // The resize band is checked before anything else, because it overlaps
+            // the tab strip along the top and the panes everywhere else. Losing a few
+            // pixels of tab to it is a fair trade for a window that can be resized at
+            // all — which, without decorations, it otherwise cannot be.
+            if button == MouseButton::Left {
+                if let Some(direction) = self.resize_edge(x, y) {
+                    if let Some(w) = &self.window {
+                        if let Err(e) = w.drag_resize_window(direction) {
+                            log::debug!("compositor declined a resize drag: {e}");
+                        }
+                    }
+                    return;
+                }
+            }
+
             // Buttons come before tabs: a close button sits inside its tab, so
             // checking the tab first would swallow the click.
             if let Some(button) = frame.action_at(x, y) {
@@ -1863,6 +1959,7 @@ impl App {
 
     fn on_mouse_move(&mut self, x: f64, y: f64) {
         self.mouse = (x, y);
+        self.update_resize_cursor(x as i32, y as i32);
 
         // Hover state changes what is drawn, so it must request a redraw — but only
         // when it actually changes, or the window repaints continuously while the

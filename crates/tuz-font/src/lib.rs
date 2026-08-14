@@ -135,6 +135,16 @@ struct GlyphKey {
 
 /// One loaded font face. The bytes are owned so `FontRef` and `rustybuzz::Face`
 /// can borrow them for as long as the system lives.
+/// Outcome of searching the already-loaded faces for a character.
+enum Loaded {
+    /// A face draws it.
+    Drawn((FontId, GlyphId)),
+    /// A face maps it, but to an empty glyph. Kept only as a last resort.
+    Blank((FontId, GlyphId)),
+    /// No loaded face maps it at all.
+    Missing,
+}
+
 struct Face {
     data: Arc<Vec<u8>>,
     index: u32,
@@ -328,37 +338,83 @@ impl FontSystem {
     ///
     /// Takes `&mut self` because the system tier may need to load a face.
     pub fn font_for_char(&mut self, c: char, style: Style) -> Option<(FontId, GlyphId)> {
-        if let Some(hit) = self.lookup_loaded(c, style) {
-            return Some(hit);
+        // A face that maps the character but draws nothing is worse than one that
+        // does not claim it at all: it ends the search with a hit and the character
+        // silently disappears. So a candidate that rasterizes blank is remembered but
+        // not accepted, and the search carries on looking for one that draws.
+        let mut blank: Option<(FontId, GlyphId)> = None;
+
+        match self.lookup_loaded(c, style) {
+            Loaded::Drawn(hit) => return Some(hit),
+            Loaded::Blank(hit) => blank = Some(hit),
+            Loaded::Missing => {}
         }
 
         // A previous scan already answered for this character.
-        if let Some(cached) = self.system_cache.get(&c) {
-            let id = (*cached)?;
-            let glyph = self.glyph_in(id, c)?;
-            return Some((id, glyph));
+        let found = match self.system_cache.get(&c) {
+            Some(cached) => *cached,
+            None => {
+                let found = self.load_from_system(c);
+                self.system_cache.insert(c, found);
+                found
+            }
+        };
+
+        if let Some(id) = found {
+            if let Some(glyph) = self.glyph_in(id, c) {
+                if self.renders(id, glyph, style) {
+                    return Some((id, glyph));
+                }
+                blank = blank.or(Some((id, glyph)));
+            }
         }
 
-        let found = self.load_from_system(c);
-        self.system_cache.insert(c, found);
-        let id = found?;
-        let glyph = self.glyph_in(id, c)?;
-        Some((id, glyph))
+        // Nothing anywhere draws it. Return the blank hit rather than `None` so a
+        // genuinely empty character — a space, U+00A0 — still measures and advances
+        // like the character it is.
+        blank
+    }
+
+    /// The family name a face was loaded from. For diagnostics.
+    pub fn family_of(&self, id: FontId) -> &str {
+        self.faces
+            .get(id.0 as usize)
+            .map(|f| f.family.as_str())
+            .unwrap_or("?")
+    }
+
+    /// Whether this glyph actually puts pixels on the screen.
+    ///
+    /// Rasterizing to answer looks expensive, but the result is cached in
+    /// `self.glyphs` and the caller is about to rasterize it anyway.
+    fn renders(&mut self, font: FontId, glyph: GlyphId, style: Style) -> bool {
+        self.rasterize(font, glyph, style)
+            .map(|g| !g.is_blank())
+            .unwrap_or(false)
     }
 
     /// Search only the faces already loaded, which is the hot path.
-    fn lookup_loaded(&self, c: char, style: Style) -> Option<(FontId, GlyphId)> {
+    fn lookup_loaded(&mut self, c: char, style: Style) -> Loaded {
         let primary = self.style_font(style);
-        let candidates = std::iter::once(primary)
+        let candidates: Vec<FontId> = std::iter::once(primary)
             .chain(self.fallbacks.iter().copied())
-            .chain(std::iter::once(self.styles[0]));
+            .chain(std::iter::once(self.styles[0]))
+            .collect();
 
+        let mut blank = None;
         for id in candidates {
-            if let Some(glyph) = self.glyph_in(id, c) {
-                return Some((id, glyph));
+            let Some(glyph) = self.glyph_in(id, c) else {
+                continue;
+            };
+            if self.renders(id, glyph, style) {
+                return Loaded::Drawn((id, glyph));
             }
+            blank = blank.or(Some((id, glyph)));
         }
-        None
+        match blank {
+            Some(hit) => Loaded::Blank(hit),
+            None => Loaded::Missing,
+        }
     }
 
     /// The glyph for `c` in an already-loaded face, if it has a real one.
@@ -396,6 +452,7 @@ impl FontSystem {
                 found = Some((info.id, family));
                 break;
             }
+
         }
 
         let (id, family) = found?;
@@ -1128,9 +1185,12 @@ mod tests {
     #[test]
     fn rasterizing_puts_a_glyph_in_the_atlas() {
         let mut sys = system();
-        let (font, glyph) = sys.font_for_char('M', Style::Regular).unwrap();
 
+        // Measured across the resolve, not after it: `font_for_char` rasterizes each
+        // candidate to check it is not blank, so by the time it returns the glyph is
+        // already cached and a second `rasterize` adds nothing.
         let before = sys.atlas().len();
+        let (font, glyph) = sys.font_for_char('M', Style::Regular).unwrap();
         let g = sys
             .rasterize(font, glyph, Style::Regular)
             .expect("should rasterize");

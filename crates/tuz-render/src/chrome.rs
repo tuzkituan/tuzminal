@@ -72,6 +72,17 @@ pub fn draw_tab_bar(
         crate::instance::FLAG_ROUND_TOP,
     ));
 
+    // A tab against the strip's left edge sits in the window's top-left corner, and
+    // as a plain rectangle it would paint the curve square again. Only that one
+    // corner is rounded — the other three meet neighbours, not the outside.
+    let corner_of = |rect: &Rect| {
+        if rect.x <= bar.x {
+            crate::instance::FLAG_ROUND_TL
+        } else {
+            0
+        }
+    };
+
     for (rect, label) in tabs.iter().zip(labels) {
         // The active tab takes the pane background so it reads as continuous with
         // the terminal below; inactive tabs stay on the strip color.
@@ -80,12 +91,14 @@ pub fn draw_tab_bar(
         } else {
             theme.split_divider()
         };
-        out.push(Instance::solid(
+        out.push(Instance::rounded(
             rect.x as f32,
             rect.y as f32,
             rect.width as f32,
             rect.height as f32,
             colors.convert(background),
+            radius,
+            corner_of(rect),
         ));
 
         // A colored bar along the bottom of the active tab. Bottom rather than top
@@ -232,46 +245,55 @@ pub fn draw_window_title(
 }
 
 /// Draw the action buttons packed at the right of the tab strip.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_chrome_buttons(
     out: &mut Vec<Instance>,
-    fonts: &mut FontSystem,
+    bar: Rect,
     buttons: &[(ChromeButton, Rect)],
     hovered: Option<ChromeButton>,
     theme: &Theme,
     colors: ColorSpace,
+    radius: f32,
 ) {
     for (button, rect) in buttons {
         let is_hovered = hovered == Some(*button);
-        if is_hovered {
-            // Close gets a red hover, because it is the one that loses work.
-            let fill = if *button == ChromeButton::Close {
+        // Close gets a red hover, because it is the one that loses work.
+        let fill = if is_hovered {
+            if *button == ChromeButton::Close {
                 theme.normal.red
             } else {
                 theme.background_focused()
-            };
-            out.push(Instance::solid(
+            }
+        } else {
+            theme.split_divider()
+        };
+        if is_hovered {
+            out.push(Instance::rounded(
                 rect.x as f32,
                 rect.y as f32,
                 rect.width as f32,
                 rect.height as f32,
                 colors.convert_opaque(fill),
+                radius,
+                if rect.right() >= bar.right() {
+                    crate::instance::FLAG_ROUND_TR
+                } else {
+                    0
+                },
             ));
         }
 
-        text::draw_in_box(
+        let tint = if is_hovered {
+            theme.foreground
+        } else {
+            theme.bright.black
+        };
+        crate::icon::draw(
             out,
-            fonts,
-            &button.glyph().to_string(),
+            *button,
             *rect,
-            0.0,
-            Align::Center,
-            if is_hovered {
-                theme.foreground
-            } else {
-                theme.bright.black
-            },
-            colors,
-            Style::Regular,
+            colors.convert_opaque(tint),
+            colors.convert_opaque(fill),
         );
     }
 }
@@ -552,7 +574,8 @@ mod tests {
         // reads as continuous with the terminal below it.
         let active_bg = colors().convert(theme.background_focused());
         assert!(
-            out.iter().any(|i| i.flags == 0 && i.color == active_bg),
+            out.iter()
+                .any(|i| i.flags & crate::FLAG_TEXTURED == 0 && i.color == active_bg),
             "the active tab should use the focused pane background"
         );
 

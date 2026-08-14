@@ -257,6 +257,18 @@ impl ConfigManager {
         old.diff(&self.settings.config)
     }
 
+    /// Load the theme named by the current config, replacing the live one.
+    ///
+    /// Separate from `modify` because a theme lives in its own file: changing
+    /// `config.theme` only changes which file to read, and until this runs the old
+    /// palette is still what everything draws with. A failure keeps the current
+    /// theme, since a terminal with no colors at all is worse than stale ones.
+    pub fn reload_theme(&mut self) -> Result<(), ThemeError> {
+        let theme = Theme::load(&self.settings.config.theme, &self.paths)?;
+        self.settings.theme = theme;
+        Ok(())
+    }
+
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
