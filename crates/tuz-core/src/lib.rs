@@ -23,7 +23,7 @@ pub mod encode;
 pub mod frame;
 pub mod session;
 
-pub use color::{inline_hint_color, resolve as resolve_colors, CellColors};
+pub use color::{inline_hint_color, resolve as resolve_colors, resolve_query, CellColors};
 pub use encode::{encode, encode_paste};
 pub use frame::{
     cursor_anchor, draw_inline_hint, input_line, snapshot, CellFlags, InputLine, RenderCell,

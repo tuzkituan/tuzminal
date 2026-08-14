@@ -118,7 +118,9 @@ real IME implementation would extend rather than replace.
 ## Smaller loose ends
 
 - The release profile sets `debug = 1` for readable perf profiles, which makes the
-  binary 156 MB; `strip` takes it to 23 MB. Fine as a default, worth knowing.
+  binary 167 MB; `strip` takes it to 25 MB. Fine as a default, worth knowing.
+  (Those are decimal MB, i.e. 159 MiB and 23 MiB — this file and the README used to quote
+  the two different units and read as though they disagreed.)
 - The registry at `github.com/tuzminal/registry` does not exist, so
   `tuzminal plugin install <name>` only works with a git URL until it does.
 

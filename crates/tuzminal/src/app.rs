@@ -4297,15 +4297,25 @@ impl App {
                     }
                 }
                 TermEvent::ColorRequest(index, format) => {
-                    let theme = self.settings.theme();
-                    let color = theme.indexed_color(index as u8);
-                    let rgb = alacritty_color::Rgb {
-                        r: color.r,
-                        g: color.g,
-                        b: color.b,
-                    };
+                    // The index spans the whole color space, not just the palette:
+                    // 256 is the foreground, 257 the background, 258 the cursor. It
+                    // goes through the cell resolver so the answer is the color the
+                    // pane actually draws with, OSC 4 overrides included. Shells
+                    // query the background (OSC 11) to pick a light or dark prompt,
+                    // so a wrong answer there is visible.
                     if let Some(session) = self.sessions.get(&pane) {
-                        session.write(format(rgb).into_bytes());
+                        let color = {
+                            let term = session.term().lock();
+                            tuz_core::resolve_query(self.settings.theme(), term.colors(), index)
+                        };
+                        if let Some(color) = color {
+                            let rgb = alacritty_color::Rgb {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                            };
+                            session.write(format(rgb).into_bytes());
+                        }
                     }
                 }
                 TermEvent::TextAreaSizeRequest(format) => {

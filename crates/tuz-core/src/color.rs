@@ -71,6 +71,55 @@ pub fn resolve(
     }
 }
 
+/// Resolve the color slot a program asked to read back with OSC 4/10/11/12.
+///
+/// `alacritty_terminal` reports the query as an index into its *whole* color
+/// space rather than into the 256-color palette: 0–255 are palette slots, 256 is
+/// the foreground, 257 the background, 258 the cursor, and the rest are the dim
+/// and bright variants. Truncating that index to a `u8` is how a background
+/// query comes back as palette color 1, so this goes through the same resolver
+/// cells use — OSC 4 overrides included, because a program that set a slot
+/// expects to read its own value back.
+///
+/// `None` for an index outside the color space, which is a slot this build knows
+/// nothing about; the caller should stay silent rather than answer with a
+/// made-up color.
+///
+/// Shells and editors lean on this: querying the background (OSC 11) is how they
+/// decide between a light and a dark palette.
+pub fn resolve_query(theme: &Theme, overrides: &Colors, index: usize) -> Option<Rgba> {
+    let color = match u8::try_from(index) {
+        Ok(i) => AnsiColor::Indexed(i),
+        Err(_) => AnsiColor::Named(named_from_index(index)?),
+    };
+    Some(resolve_one(theme, overrides, color))
+}
+
+/// The `NamedColor` a color-space index above the palette stands for.
+///
+/// Spelled out rather than transmuted: the enum's discriminants are what
+/// `alacritty_terminal` indexes its color list by, and a wrong guess here would
+/// answer a query with a neighboring slot.
+fn named_from_index(index: usize) -> Option<NamedColor> {
+    use NamedColor::*;
+    Some(match index {
+        256 => Foreground,
+        257 => Background,
+        258 => Cursor,
+        259 => DimBlack,
+        260 => DimRed,
+        261 => DimGreen,
+        262 => DimYellow,
+        263 => DimBlue,
+        264 => DimMagenta,
+        265 => DimCyan,
+        266 => DimWhite,
+        267 => BrightForeground,
+        268 => DimForeground,
+        _ => return None,
+    })
+}
+
 fn resolve_one(theme: &Theme, overrides: &Colors, color: AnsiColor) -> Rgba {
     match color {
         // A literal RGB triple from the program: never themed.
@@ -257,6 +306,63 @@ mod tests {
             Flags::empty(),
         );
         assert_eq!(c.fg, Rgba::rgb(9, 9, 9));
+    }
+
+    #[test]
+    fn a_background_query_answers_with_the_background() {
+        // The regression this guards: 257 truncated to a `u8` is 1, so an OSC 11
+        // query used to come back as palette red and every shell that sniffs the
+        // background picked a dark prompt on a light theme.
+        let t = theme();
+        let index = NamedColor::Background as usize;
+        assert_eq!(index, 257, "the color space, not the palette");
+        assert_eq!(
+            resolve_query(&t, &no_overrides(), index),
+            Some(t.background)
+        );
+        assert_eq!(
+            resolve_query(&t, &no_overrides(), NamedColor::Foreground as usize),
+            Some(t.foreground)
+        );
+        assert_eq!(
+            resolve_query(&t, &no_overrides(), NamedColor::Cursor as usize),
+            Some(t.cursor())
+        );
+    }
+
+    #[test]
+    fn a_palette_query_answers_from_the_palette() {
+        let t = theme();
+        assert_eq!(resolve_query(&t, &no_overrides(), 1), Some(t.normal.red));
+        assert_eq!(
+            resolve_query(&t, &no_overrides(), 200),
+            Some(t.indexed_color(200))
+        );
+    }
+
+    #[test]
+    fn a_query_reads_back_what_the_program_set() {
+        // A program that set the background with OSC 11, or a palette slot with
+        // OSC 4, must read its own value back rather than the theme's.
+        let mut overrides = no_overrides();
+        overrides[NamedColor::Background as usize] = Some(Rgb { r: 7, g: 8, b: 9 });
+        overrides[4] = Some(Rgb { r: 1, g: 2, b: 3 });
+
+        assert_eq!(
+            resolve_query(&theme(), &overrides, NamedColor::Background as usize),
+            Some(Rgba::rgb(7, 8, 9))
+        );
+        assert_eq!(
+            resolve_query(&theme(), &overrides, 4),
+            Some(Rgba::rgb(1, 2, 3))
+        );
+    }
+
+    #[test]
+    fn a_query_for_an_unknown_slot_goes_unanswered() {
+        // Better silent than confidently wrong: the caller skips the reply.
+        assert_eq!(resolve_query(&theme(), &no_overrides(), 269), None);
+        assert_eq!(resolve_query(&theme(), &no_overrides(), usize::MAX), None);
     }
 
     #[test]

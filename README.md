@@ -270,8 +270,9 @@ cargo bench --workspace --features tuz-core/test-util  # VT parser throughput
 ./scripts/package.sh                                   # .rpm, .deb and .tar.gz in dist/
 ```
 
-`package.sh` strips the binary first — the release profile keeps debug symbols so perf
-profiles stay readable, and a download should not carry them. The `.rpm` and `.deb` need
+`package.sh` strips the binary first, taking it from 167 MB to 25 MB — the release profile
+keeps debug symbols on purpose so perf profiles stay readable, and a download should not
+carry them. The `.rpm` and `.deb` need
 `cargo install cargo-deb cargo-generate-rpm`, and are skipped with a note if absent rather
 than failing the build. CI builds and tests all three platforms on every push, plus clippy,
 rustfmt and `cargo audit`.
