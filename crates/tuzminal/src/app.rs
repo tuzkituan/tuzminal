@@ -107,6 +107,14 @@ const RESIZE_BORDER: i32 = 6;
 /// behind the window after the mouse is released.
 const GRID_SETTLE: Duration = Duration::from_millis(80);
 
+/// Marks an app-menu entry as standing in for a toolbar button that did not fit.
+///
+/// Prefixed rather than given its own `MenuKind`, because the entry belongs to the same
+/// menu as the three pages and only its handling differs. The suffix is the button's
+/// `describe()` text, which is also its label — so the menu and the tooltip cannot
+/// disagree about what a button is called.
+const BUTTON_PREFIX: &str = "button:";
+
 /// How many frames `--resize-bench` averages over.
 const BENCH_FRAMES: u64 = 200;
 
@@ -2334,6 +2342,16 @@ impl App {
                 "settings" => self.open_settings(),
                 "help" => self.toggle_help(),
                 "plugins" => self.toggle_plugins(),
+                // A button that did not fit on the strip. Routed through
+                // `press_chrome_button` so it does exactly what pressing it would have
+                // done, rather than a second copy of that behaviour that can drift.
+                collapsed if collapsed.starts_with(BUTTON_PREFIX) => {
+                    let name = &collapsed[BUTTON_PREFIX.len()..];
+                    match ChromeButton::ALL.into_iter().find(|b| b.describe() == name) {
+                        Some(button) => self.press_chrome_button(button),
+                        None => log::debug!("no button called `{name}`"),
+                    }
+                }
                 other => log::debug!("unknown menu entry `{other}`"),
             },
         }
@@ -2354,17 +2372,35 @@ impl App {
             return;
         };
 
-        let items = [
-            ("Settings", "settings"),
-            ("Shortcuts", "help"),
-            ("Plugins", "plugins"),
-        ]
-        .into_iter()
-        .map(|(label, value)| crate::menu::MenuItem {
-            label: label.to_owned(),
-            value: value.to_owned(),
-        })
-        .collect();
+        // Whatever the strip was too narrow to show, first — these are the buttons the
+        // user was reaching for and could not find, and they are the reason the menu was
+        // opened. The three pages are always there below them.
+        let collapsed: Vec<ChromeButton> = self
+            .frame
+            .as_ref()
+            .map(|f| f.collapsed_actions.clone())
+            .unwrap_or_default();
+
+        let mut items: Vec<crate::menu::MenuItem> = collapsed
+            .iter()
+            .map(|button| crate::menu::MenuItem {
+                label: button.describe().to_owned(),
+                value: format!("{BUTTON_PREFIX}{}", button.describe()),
+            })
+            .collect();
+
+        items.extend(
+            [
+                ("Settings", "settings"),
+                ("Shortcuts", "help"),
+                ("Plugins", "plugins"),
+            ]
+            .into_iter()
+            .map(|(label, value)| crate::menu::MenuItem {
+                label: label.to_owned(),
+                value: value.to_owned(),
+            }),
+        );
 
         self.menu = Some(crate::menu::Menu::new(
             crate::menu::MenuKind::AppMenu,

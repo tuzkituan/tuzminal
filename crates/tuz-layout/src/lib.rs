@@ -122,6 +122,10 @@ pub struct Frame {
     pub tab_close: Vec<Rect>,
     /// Action buttons packed against the right of the strip.
     pub actions: Vec<(ChromeButton, Rect)>,
+    /// Buttons the strip was too narrow for, to be offered in the app menu instead.
+    ///
+    /// In the order they should appear there. Empty at any comfortable width.
+    pub collapsed_actions: Vec<ChromeButton>,
     /// The explorer sidebar, or a zero-width rect when it is closed.
     pub sidebar: Rect,
 }
@@ -163,6 +167,34 @@ impl ChromeButton {
         ChromeButton::Maximize,
         ChromeButton::Close,
     ];
+
+    /// Where this button sits in the queue to be moved into the app menu when the strip
+    /// runs out of width, or `None` if it must stay on the strip at any width.
+    ///
+    /// Lower goes first. The order is by how much a button costs to lose: the split
+    /// buttons have keyboard shortcuts and are the least missed from the strip, the
+    /// explorer likewise, and the new-tab dropdown last because it is the only way to
+    /// open a shell other than the default one.
+    ///
+    /// New-tab, the app menu and the three window controls return `None`. New-tab is the
+    /// most used button on the strip, the app menu is where the collapsed ones go — so
+    /// collapsing it would strand them — and a window with no close button is a trap.
+    pub fn collapse_order(self) -> Option<u8> {
+        Some(match self {
+            ChromeButton::SplitDown => 0,
+            ChromeButton::SplitRight => 1,
+            ChromeButton::Explorer => 2,
+            ChromeButton::NewTabMenu => 3,
+            ChromeButton::NewTab
+            | ChromeButton::AppMenu
+            | ChromeButton::Plugins
+            | ChromeButton::Help
+            | ChromeButton::Settings
+            | ChromeButton::Minimize
+            | ChromeButton::Maximize
+            | ChromeButton::Close => return None,
+        })
+    }
 
     /// Whether this button belongs immediately after the last tab rather than in
     /// the group packed against the right edge.
@@ -710,10 +742,14 @@ impl Layout {
             .filter(|b| !b.leading())
             .collect();
 
-        let (mut actions, free) = if tab_bar.height > 0 {
-            action_rects(tab_bar, &trailing)
+        // Keep room for one tab at its minimum, plus the slot each leading button will
+        // take after the tabs. Reserving only one button's worth — what this did before —
+        // meant the trailing buttons could eat the space new-tab was about to need.
+        let reserve = opts.min_tab_width + leading.len() as u32 * tab_bar.height;
+        let (mut actions, collapsed_actions, free) = if tab_bar.height > 0 {
+            action_rects_collapsing(tab_bar, &trailing, reserve)
         } else {
-            (Vec::new(), tab_bar)
+            (Vec::new(), Vec::new(), tab_bar)
         };
 
         // Reserve a slot per leading button up front, so the tabs stop short of where
@@ -768,6 +804,7 @@ impl Layout {
             tabs,
             tab_close,
             actions,
+            collapsed_actions,
             sidebar,
         }
     }
@@ -780,18 +817,63 @@ impl Layout {
 /// ones that do not fit are dropped rather than overlapping the tabs — a button drawn
 /// on top of a tab would steal its clicks.
 pub fn action_rects(bar: Rect, buttons: &[ChromeButton]) -> (Vec<(ChromeButton, Rect)>, Rect) {
+    let (placed, _, tab_area) = action_rects_collapsing(bar, buttons, bar.height);
+    (placed, tab_area)
+}
+
+/// Lay out the trailing buttons, moving what does not fit into the app menu.
+///
+/// Returns the buttons that were placed, the ones that must be offered in the menu
+/// instead, and what is left of the strip for tabs.
+///
+/// The narrow case used to be handled by stopping the loop when it ran out of room,
+/// which dropped whichever buttons happened to be last in the list — new-tab and the
+/// new-tab dropdown, since the strip is packed from the right. So the two most useful
+/// buttons were the first to vanish, and nothing said where they had gone. Buttons now
+/// leave in a deliberate order and land somewhere the user can still reach them.
+///
+/// `reserve` is how much of the strip to keep for tabs. A strip that is all buttons and
+/// no tabs is not a tab strip.
+pub fn action_rects_collapsing(
+    bar: Rect,
+    buttons: &[ChromeButton],
+    reserve: u32,
+) -> (Vec<(ChromeButton, Rect)>, Vec<ChromeButton>, Rect) {
     let size = bar.height;
     if size == 0 || buttons.is_empty() {
-        return (Vec::new(), bar);
+        return (Vec::new(), Vec::new(), bar);
+    }
+
+    // How many whole buttons fit beside the space kept for tabs.
+    let room = bar.width.saturating_sub(reserve) / size;
+
+    // Who leaves, in the order they volunteered. Sorted by `collapse_order` rather than
+    // by position, so it is the least-missed button that goes and not merely the last
+    // one in the list.
+    let mut collapsed: Vec<ChromeButton> = Vec::new();
+    if buttons.len() as u32 > room {
+        let mut candidates: Vec<ChromeButton> = buttons
+            .iter()
+            .copied()
+            .filter(|b| b.collapse_order().is_some())
+            .collect();
+        candidates.sort_by_key(|b| b.collapse_order());
+
+        let excess = buttons.len() as u32 - room;
+        collapsed.extend(candidates.into_iter().take(excess as usize));
     }
 
     let mut placed = Vec::with_capacity(buttons.len());
     let mut right = bar.right();
 
     for button in buttons {
+        if collapsed.contains(button) {
+            continue;
+        }
         let left = right - size as i32;
-        // Leave at least one button's worth of room for tabs.
-        if left < bar.x + size as i32 {
+        // Nothing collapsible left to give up, and still no room. Better a button off the
+        // edge than a close button that cannot be clicked, so the loop stops here.
+        if left < bar.x {
             break;
         }
         placed.push((*button, Rect::new(left, bar.y, size, size.min(bar.height))));
@@ -800,7 +882,7 @@ pub fn action_rects(bar: Rect, buttons: &[ChromeButton]) -> (Vec<(ChromeButton, 
 
     let consumed = (bar.right() - right).max(0) as u32;
     let tab_area = Rect::new(bar.x, bar.y, bar.width.saturating_sub(consumed), bar.height);
-    (placed, tab_area)
+    (placed, collapsed, tab_area)
 }
 
 /// The close button inside a tab, against its right edge.
@@ -1792,6 +1874,154 @@ mod chrome_button_tests {
                 "{button:?} has no description"
             );
             assert_ne!(button.glyph(), '\0', "{button:?} has no glyph");
+        }
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    const H: u32 = 30;
+
+    /// The strip as the app builds it: window controls, menu, explorer, splits, new tab.
+    fn trailing() -> Vec<ChromeButton> {
+        vec![
+            ChromeButton::Close,
+            ChromeButton::Maximize,
+            ChromeButton::Minimize,
+            ChromeButton::AppMenu,
+            ChromeButton::Explorer,
+            ChromeButton::SplitDown,
+            ChromeButton::SplitRight,
+            ChromeButton::NewTabMenu,
+        ]
+    }
+
+    fn at(width: u32) -> (Vec<ChromeButton>, Vec<ChromeButton>) {
+        let (placed, collapsed, _) =
+            action_rects_collapsing(Rect::new(0, 0, width, H), &trailing(), 120);
+        (placed.into_iter().map(|(b, _)| b).collect(), collapsed)
+    }
+
+    #[test]
+    fn a_wide_strip_shows_everything_and_collapses_nothing() {
+        let (placed, collapsed) = at(1600);
+        assert_eq!(placed.len(), trailing().len());
+        assert!(collapsed.is_empty(), "{collapsed:?} collapsed at 1600px");
+    }
+
+    #[test]
+    fn the_split_buttons_go_first_and_the_window_controls_never_go() {
+        // The order matters: splits have keyboard shortcuts, a close button does not have
+        // an alternative that anyone will find.
+        let mut seen: Vec<ChromeButton> = Vec::new();
+        for width in (200..1200).rev().step_by(10) {
+            let (placed, collapsed) = at(width);
+            for button in collapsed {
+                if !seen.contains(&button) {
+                    seen.push(button);
+                }
+            }
+            for essential in [
+                ChromeButton::Close,
+                ChromeButton::Maximize,
+                ChromeButton::Minimize,
+                ChromeButton::AppMenu,
+            ] {
+                assert!(
+                    placed.contains(&essential),
+                    "{essential:?} left the strip at {width}px"
+                );
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                ChromeButton::SplitDown,
+                ChromeButton::SplitRight,
+                ChromeButton::Explorer,
+                ChromeButton::NewTabMenu,
+            ],
+            "buttons collapsed in the wrong order"
+        );
+    }
+
+    #[test]
+    fn nothing_is_both_placed_and_collapsed() {
+        // A button in both lists would be drawn on the strip *and* offered in the menu.
+        for width in (150..1400).step_by(7) {
+            let (placed, collapsed) = at(width);
+            for button in &collapsed {
+                assert!(
+                    !placed.contains(button),
+                    "{button:?} is on the strip and in the menu at {width}px"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_button_is_accounted_for_at_every_width() {
+        // The bug this replaces: the loop stopped when it ran out of room and the
+        // remaining buttons simply ceased to exist, with nothing offering them anywhere.
+        // Below the point where even the non-collapsible ones stop fitting, buttons can
+        // still be dropped — but that is a strip too narrow for a close button, not a
+        // width anyone resizes to on purpose.
+        for width in (400..1400).step_by(11) {
+            let (placed, collapsed) = at(width);
+            assert_eq!(
+                placed.len() + collapsed.len(),
+                trailing().len(),
+                "buttons went missing at {width}px: placed {placed:?}, collapsed {collapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_buttons_are_all_ones_that_volunteered() {
+        for width in (150..1400).step_by(13) {
+            let (_, collapsed) = at(width);
+            for button in collapsed {
+                assert!(
+                    button.collapse_order().is_some(),
+                    "{button:?} was collapsed but is marked as staying"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_placed_buttons_never_overlap_or_leave_the_strip() {
+        for width in (200..1400).step_by(9) {
+            let bar = Rect::new(0, 0, width, H);
+            let (placed, _, tabs) = action_rects_collapsing(bar, &trailing(), 120);
+            for (i, (_, a)) in placed.iter().enumerate() {
+                assert!(
+                    a.x >= bar.x && a.right() <= bar.right(),
+                    "{a:?} at {width}px"
+                );
+                for (_, b) in &placed[i + 1..] {
+                    assert!(
+                        a.right() <= b.x || b.right() <= a.x,
+                        "{a:?} overlaps {b:?} at {width}px"
+                    );
+                }
+                assert!(
+                    a.x >= tabs.right(),
+                    "{a:?} overlaps the tab area {tabs:?} at {width}px"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_app_menu_is_never_collapsed_because_it_is_where_the_others_go() {
+        // Collapsing it would strand everything that collapsed into it.
+        assert_eq!(ChromeButton::AppMenu.collapse_order(), None);
+        for width in (100..1400).step_by(5) {
+            let (_, collapsed) = at(width);
+            assert!(!collapsed.contains(&ChromeButton::AppMenu));
         }
     }
 }
