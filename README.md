@@ -8,7 +8,7 @@ abstracted so macOS and Windows are a port rather than a rewrite.
 
 > **Status: M1–M5 complete.** It runs shells, renders text, splits, tabs with a
 > drawn tab bar, themes, a plugin status bar, and loads Lua and WASM plugins.
-> 570 tests pass, including GPU tests that read pixels back. macOS and Windows
+> 613 tests pass, including GPU tests that read pixels back. macOS and Windows
 > are untested. See [Status](#status) for the honest detail.
 
 ## Build and run
@@ -211,19 +211,22 @@ OSC 0/2, an active-tab marker, activity dots and click-to-switch; a status bar f
 by plugins; mouse selection and clipboard; scrollback; SGR mouse reporting;
 bracketed paste; live config reload; Lua and WASM plugins; the package manager CLI.
 
-**Not done:** subpixel antialiasing; IME for CJK input; `select_all`; plugin
-config overlays; tab reordering; a text-input widget (the font picker is a dropdown
-over installed monospace families instead). macOS and Windows
+**Not done:** subpixel antialiasing; IME for CJK input; per-line damage tracking.
+macOS and Windows are built by CI but have never been run on real hardware. macOS and Windows
 compile-target support is in place via the abstractions but **has never been built
 or run** — treat it as unverified.
 
 ## Development
 
 ```bash
-cargo test --workspace --features tuz-core/test-util   # 570 tests
+cargo test --workspace --features tuz-core/test-util   # 613 tests
 cargo clippy --workspace --all-targets                 # clean
 cargo fmt --all
+cargo bench --workspace --features tuz-core/test-util   # VT parser throughput
 ```
+
+CI builds and tests Linux, macOS and Windows on every push, plus clippy, rustfmt and
+`cargo audit`.
 
 The pure-logic crates carry most of the tests, because split geometry, chord
 parsing, config diffing and VT encoding are where subtle bugs hide and where they

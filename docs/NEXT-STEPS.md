@@ -30,27 +30,20 @@ drawing, but the interactions themselves have never had a real pointer on them.
 
 ## Panel gaps worth closing
 
-**A text-input widget.** Deliberately skipped: a cursor, selection, clipboard and
-eventually IME is a lot for one setting, and the font picker is better as a dropdown
-regardless. But `[shell] program`, `args` and `env` cannot be edited without one, and
-neither can a custom theme name. If it gets built, it should live in `tuz-ui`
-alongside the other widgets and reuse the same `UiAction` channel.
-
 **More settings.** The panel exposes a subset by design. `[keys]`, `[shell]` and
 `[plugins]` were left out as better hand-edited, but a keybinding editor is the one
 most people would actually want, and it needs the chord-capture UI that does not
 exist yet.
 
-**Tooltips.** `ChromeButton::describe` already returns the text; nothing displays it.
-The tab strip buttons are glyphs with no labels, which is fine for `+` and `×` and
-much less obvious for the split buttons.
-
-**Tab reordering.** Dragging a tab to a new position. `Layout::tabs` is a `Vec`, so
-the model supports it; it needs drag state in `app.rs` and an insertion indicator.
-
 ---
 
 ## Rendering
+
+**Parser throughput is worth a look.** `cargo bench -p tuz-core --features test-util`
+reports roughly 23 MiB/s of plain ASCII and 11 MiB/s of cursor-addressed output on
+this machine. That is enough that `cat` of a large file is not painful, but it is not
+obviously competitive; nobody has profiled where the time goes, and the benchmark
+exists precisely so a change can be measured rather than guessed at.
 
 **Subpixel antialiasing.** `grayscale_antialiasing` is in the schema and documented
 as having no effect. Real subpixel AA needs three-channel coverage in the glyph atlas
@@ -64,16 +57,15 @@ per-line bounds, which would let the instance buffer be updated in place for the
 lines that changed. Worth doing before claiming the performance targets in the plan;
 worth measuring first, because at terminal sizes the rebuild may already be cheap.
 
-**Benchmarks.** `benches/` was in the original plan and never written. The useful
-ones: `cat` of a large file compared against `alacritty` on the same machine, the
-`vtebench` suite, and a frame-time histogram under continuous output asserting p99
-stays inside the vsync interval.
-
 ---
 
 ## Platform
 
-**macOS and Windows have never been built or run.** This is the largest honest gap.
+**macOS and Windows have never been built or run** on a real machine. A CI matrix
+now builds and tests all three targets on every push
+(`.github/workflows/ci.yml`), which is the closest thing to closing this gap without
+hardware — but until that workflow has actually run green, cross-platform support
+stays a claim rather than a fact.
 The abstractions are in place and `alacritty_terminal` supplies ConPTY, so the
 expectation is compile errors rather than redesign, but that expectation is untested.
 Concrete unknowns:
@@ -85,9 +77,6 @@ Concrete unknowns:
 - The `#[cfg(windows)] escape_args` field in `tty::Options` is set but never
   exercised.
 
-A CI matrix building all three targets would catch most of it without a physical
-machine.
-
 **IME.** Wayland `text-input-v3` for CJK input. Genuinely involved, and the reason
 `keys::bytes_for_key` prefers the platform's composed text — that path is the hook a
 real IME implementation would extend rather than replace.
@@ -96,10 +85,6 @@ real IME implementation would extend rather than replace.
 
 ## Smaller loose ends
 
-- `select_all` is a named action that logs "not implemented yet".
-- `Command::SetConfigOverlay` from a plugin is accepted and logged, not applied.
-- `Notify` from a plugin goes to the log; there is no on-screen notification surface.
-- No `LICENSE` files, though `Cargo.toml` declares `MIT OR Apache-2.0`.
 - The release profile sets `debug = 1` for readable perf profiles, which makes the
   binary 156 MB; `strip` takes it to 23 MB. Fine as a default, worth knowing.
 - The registry at `github.com/tuzminal/registry` does not exist, so

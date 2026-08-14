@@ -394,9 +394,10 @@ impl Session {
         // The default `StdSyncHandler` timeout is what the real PTY path uses.
         let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         let mut term = self.term.lock();
-        for &byte in bytes {
-            parser.advance(&mut *term, &[byte]);
-        }
+        // Fed as one slice, matching the real PTY path, which hands the parser whole
+        // read buffers. Advancing byte-at-a-time works but is several times slower
+        // and would make any benchmark built on this helper measure the wrong thing.
+        parser.advance(&mut *term, bytes);
     }
 
     /// Ask the PTY thread to shut down and wait for it.

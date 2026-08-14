@@ -26,3 +26,10 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 tuz-config = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "throughput"
+# Plain `main`, not libtest: the numbers are for a human to read, and libtest's
+# bencher is unstable.
+harness = false
+required-features = ["test-util"]

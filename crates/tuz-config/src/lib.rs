@@ -88,6 +88,35 @@ pub enum LoadError {
     Theme(#[from] ThemeError),
 }
 
+/// Recursively merge `overlay` into `base`, overlay winning on conflicts.
+///
+/// Tables merge key by key rather than wholesale, so an overlay setting `font.size`
+/// does not delete `font.family`.
+fn merge_tables(base: &mut toml_edit::Table, overlay: &toml_edit::Table) {
+    for (key, value) in overlay.iter() {
+        match (base.get_mut(key), value) {
+            (Some(toml_edit::Item::Table(existing)), toml_edit::Item::Table(incoming)) => {
+                merge_tables(existing, incoming);
+            }
+            _ => {
+                base.insert(key, value.clone());
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OverlayError {
+    #[error("could not serialize the current configuration")]
+    Serialize(#[source] toml::ser::Error),
+    #[error("the overlay is not valid TOML: {0}")]
+    Parse(Box<toml_edit::TomlError>),
+    #[error("the overlay does not fit the configuration schema: {0}")]
+    Invalid(Box<toml::de::Error>),
+    #[error("the overlay produces an invalid configuration:\n{}", errors.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"))]
+    Validation { errors: Vec<ValidationError> },
+}
+
 /// Result of a [`ConfigManager::reload`].
 #[derive(Debug)]
 pub enum ReloadOutcome {
@@ -244,6 +273,42 @@ impl ConfigManager {
     /// Error from the most recent load attempt, if it failed.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// Merge a TOML fragment over the current config.
+    ///
+    /// For plugin config overlays. A fragment rather than typed fields so plugins keep
+    /// working as the schema grows, and validated as a whole before being applied —
+    /// a partially-applied overlay would leave the terminal in a state no config file
+    /// could ever produce.
+    ///
+    /// The overlay is transient: it is never saved, and the next reload from disk
+    /// discards it. A plugin that could silently rewrite the user's config file would
+    /// be a much bigger grant than the permission system implies.
+    pub fn apply_overlay(&mut self, fragment: &str) -> Result<ReloadActions, OverlayError> {
+        // Serialize the live config, merge the fragment into it, and re-parse. Going
+        // through TOML means the fragment is interpreted exactly as it would be in a
+        // config file, rather than by a second hand-written merge that could diverge.
+        let current = toml::to_string(self.config()).map_err(OverlayError::Serialize)?;
+
+        let mut doc: toml_edit::DocumentMut = current
+            .parse()
+            .map_err(|e| OverlayError::Parse(Box::new(e)))?;
+        let overlay: toml_edit::DocumentMut = fragment
+            .parse()
+            .map_err(|e| OverlayError::Parse(Box::new(e)))?;
+
+        merge_tables(doc.as_table_mut(), overlay.as_table());
+
+        let merged: Config =
+            toml::from_str(&doc.to_string()).map_err(|e| OverlayError::Invalid(Box::new(e)))?;
+        merged
+            .validate()
+            .map_err(|errors| OverlayError::Validation { errors })?;
+
+        let actions = self.settings.config.diff(&merged);
+        self.settings.config = merged;
+        Ok(actions)
     }
 
     /// Write changed settings back to `config.toml`.
@@ -539,5 +604,114 @@ white = "#ffffff"
     fn poll_changes_is_false_without_a_watcher() {
         let (_d, mgr) = manager_with("nowatch", None);
         assert!(!mgr.poll_changes());
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    fn manager() -> ConfigManager {
+        ConfigManager::load(Paths::for_test())
+    }
+
+    #[test]
+    fn an_overlay_changes_only_what_it_names() {
+        // Merging table-by-table rather than wholesale: setting font.size must not
+        // delete font.family.
+        let mut mgr = manager();
+        let family = mgr.config().font.family.clone();
+
+        mgr.apply_overlay("[font]\nsize = 18.0\n").unwrap();
+
+        assert_eq!(mgr.config().font.size, 18.0);
+        assert_eq!(mgr.config().font.family, family, "siblings must survive");
+    }
+
+    #[test]
+    fn an_overlay_reports_the_work_it_requires() {
+        let mut mgr = manager();
+        let actions = mgr.apply_overlay("[font]\nsize = 20.0\n").unwrap();
+        assert!(actions.rebuild_fonts, "a size change needs new metrics");
+        assert!(actions.relayout);
+    }
+
+    #[test]
+    fn a_top_level_key_can_be_overlaid() {
+        let mut mgr = manager();
+        mgr.apply_overlay("theme = \"tuz-light\"\n").unwrap();
+        assert_eq!(mgr.config().theme, "tuz-light");
+    }
+
+    #[test]
+    fn malformed_toml_is_rejected_without_changing_anything() {
+        let mut mgr = manager();
+        let before = mgr.config().clone();
+
+        let err = mgr.apply_overlay("this is not toml {{{").unwrap_err();
+        assert!(matches!(err, OverlayError::Parse(_)), "got {err}");
+        assert_eq!(mgr.config(), &before, "config must be untouched");
+    }
+
+    #[test]
+    fn an_unknown_key_is_rejected() {
+        // The schema denies unknown fields, so a plugin typo is reported rather than
+        // silently doing nothing.
+        let mut mgr = manager();
+        let err = mgr.apply_overlay("[font]\nsiz = 18.0\n").unwrap_err();
+        assert!(matches!(err, OverlayError::Invalid(_)), "got {err}");
+    }
+
+    #[test]
+    fn an_overlay_that_would_produce_an_invalid_config_is_refused() {
+        // The important one: a plugin must not be able to put the terminal into a
+        // state no config file could ever produce.
+        let mut mgr = manager();
+        let before = mgr.config().clone();
+
+        let err = mgr.apply_overlay("[window]\nopacity = 5.0\n").unwrap_err();
+        match err {
+            OverlayError::Validation { errors } => {
+                assert!(errors.iter().any(|e| e.field == "window.opacity"));
+            }
+            other => panic!("expected a validation failure, got {other}"),
+        }
+        assert_eq!(mgr.config(), &before);
+    }
+
+    #[test]
+    fn overlays_accumulate() {
+        let mut mgr = manager();
+        mgr.apply_overlay("[font]\nsize = 15.0\n").unwrap();
+        mgr.apply_overlay("[window]\nopacity = 0.8\n").unwrap();
+
+        assert_eq!(mgr.config().font.size, 15.0, "the first should survive");
+        assert_eq!(mgr.config().window.opacity, 0.8);
+    }
+
+    #[test]
+    fn an_empty_overlay_is_a_no_op() {
+        let mut mgr = manager();
+        let before = mgr.config().clone();
+        let actions = mgr.apply_overlay("").unwrap();
+        assert!(actions.is_empty());
+        assert_eq!(mgr.config(), &before);
+    }
+
+    #[test]
+    fn an_overlay_is_transient_and_never_reaches_the_file() {
+        // A plugin that could silently rewrite the user's config would be a far
+        // bigger grant than the permission system implies.
+        let mut mgr = manager();
+        mgr.apply_overlay("[font]\nsize = 21.0\n").unwrap();
+        assert_eq!(mgr.config().font.size, 21.0);
+
+        // Reloading from disk (which has no file here) discards it.
+        let _ = mgr.reload();
+        assert_eq!(
+            mgr.config().font.size,
+            Config::default().font.size,
+            "the overlay should not persist across a reload"
+        );
     }
 }

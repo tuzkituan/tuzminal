@@ -485,6 +485,32 @@ impl Layout {
         self.tabs.is_empty()
     }
 
+    /// Move a tab to a new position, keeping the same tab active.
+    ///
+    /// Returns whether anything moved. The active *tab* is preserved rather than the
+    /// active *index*: dragging a tab must not silently switch which one you are
+    /// looking at, and the index of the tab you are on changes as things shuffle
+    /// past it.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return false;
+        }
+
+        let active_pane = self.tabs[self.active].focus();
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+
+        // Find where the previously active tab ended up.
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.root().contains(active_pane))
+        {
+            self.active = index;
+        }
+        true
+    }
+
     pub fn select_tab(&mut self, index: usize) -> bool {
         if index < self.tabs.len() {
             self.active = index;
@@ -1226,5 +1252,101 @@ mod chrome_tests {
             "the lower pane stops above the status bar"
         );
         assert_eq!(top.height + bottom.height, 556);
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    /// Three tabs, each identified by the pane it holds.
+    fn three() -> (Layout, Vec<PaneId>) {
+        let (mut layout, first) = Layout::new();
+        let second = layout.new_tab();
+        let third = layout.new_tab();
+        (layout, vec![first, second, third])
+    }
+
+    fn order(layout: &Layout) -> Vec<PaneId> {
+        layout.tabs().iter().map(|t| t.focus()).collect()
+    }
+
+    #[test]
+    fn moving_a_tab_later_shifts_the_others_back() {
+        let (mut layout, panes) = three();
+        assert!(layout.move_tab(0, 2));
+        assert_eq!(order(&layout), vec![panes[1], panes[2], panes[0]]);
+    }
+
+    #[test]
+    fn moving_a_tab_earlier_shifts_the_others_forward() {
+        let (mut layout, panes) = three();
+        assert!(layout.move_tab(2, 0));
+        assert_eq!(order(&layout), vec![panes[2], panes[0], panes[1]]);
+    }
+
+    #[test]
+    fn the_same_tab_stays_active_after_a_move() {
+        // Preserving the active *index* would silently switch which tab you are
+        // looking at as others shuffle past it.
+        let (mut layout, panes) = three();
+        layout.select_tab(0);
+        assert_eq!(layout.active_pane(), panes[0]);
+
+        layout.move_tab(0, 2);
+        assert_eq!(
+            layout.active_pane(),
+            panes[0],
+            "still looking at the tab that was dragged"
+        );
+        assert_eq!(layout.active_index(), 2, "which is now last");
+    }
+
+    #[test]
+    fn moving_a_tab_past_the_active_one_updates_its_index() {
+        let (mut layout, panes) = three();
+        layout.select_tab(2);
+        assert_eq!(layout.active_index(), 2);
+
+        // Drag the first tab to the end; the active one shifts down by one.
+        layout.move_tab(0, 2);
+        assert_eq!(layout.active_pane(), panes[2]);
+        assert_eq!(layout.active_index(), 1);
+    }
+
+    #[test]
+    fn a_no_op_move_is_reported_as_such() {
+        let (mut layout, _) = three();
+        assert!(!layout.move_tab(1, 1));
+    }
+
+    #[test]
+    fn out_of_range_indices_are_refused_rather_than_panicking() {
+        // Reachable from a drag that ends outside the strip.
+        let (mut layout, panes) = three();
+        assert!(!layout.move_tab(0, 99));
+        assert!(!layout.move_tab(99, 0));
+        assert_eq!(order(&layout), panes);
+    }
+
+    #[test]
+    fn moving_with_a_single_tab_does_nothing() {
+        let (mut layout, _) = Layout::new();
+        assert!(!layout.move_tab(0, 0));
+        assert_eq!(layout.tab_count(), 1);
+    }
+
+    #[test]
+    fn a_move_preserves_every_tab() {
+        // The reorder must not lose or duplicate a tab, which would strand a PTY.
+        let (mut layout, panes) = three();
+        layout.move_tab(1, 0);
+
+        let mut after = order(&layout);
+        after.sort();
+        let mut before = panes.clone();
+        before.sort();
+        assert_eq!(after, before);
+        assert_eq!(layout.tab_count(), 3);
     }
 }

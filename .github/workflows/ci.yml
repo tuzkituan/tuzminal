@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings in CI while leaving local builds quiet.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The job this repository actually needs. macOS and Windows support exists in the
+  # platform abstractions but has never been built or run, so until this passes,
+  # cross-platform support is a claim rather than a fact.
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel the other platforms when one fails: the interesting question
+      # is which platforms break, not that any did.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # Linux needs the windowing, font and audio headers that winit, fontdb and
+      # wgpu link against. macOS and Windows get theirs from the SDK.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libfontconfig-1-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      # Tests that need a font are skipped rather than failed on a runner without
+      # one; the font-dependent suites say so in their panic message.
+      - name: Install a font for the font tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+
+      - name: Test
+        # The GPU tests skip themselves when no adapter is available, which is the
+        # normal case on a headless runner. Everything else must pass.
+        run: cargo test --workspace --features tuz-core/test-util
+
+  lint:
+    name: clippy and rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libfontconfig-1-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+  # A terminal that renders text is a poor place for an unaudited dependency, and
+  # the tree pulls in a GPU stack, a VT parser and two plugin runtimes.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -46,6 +46,41 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+/// A message shown briefly over the terminal.
+struct Notification {
+    text: String,
+    level: tuz_plugin_api::NotifyLevel,
+    shown_at: Instant,
+}
+
+/// How long a toast stays fully opaque before fading.
+const TOAST_HOLD: Duration = Duration::from_secs(4);
+/// How long the fade itself takes.
+const TOAST_FADE: Duration = Duration::from_millis(600);
+/// Cap on stacked toasts. A plugin in a loop must not fill the window.
+const MAX_TOASTS: usize = 4;
+
+/// A tab being dragged along the strip.
+#[derive(Debug, Clone, Copy)]
+struct TabDrag {
+    /// Where the tab started, so a drag that goes nowhere can be told from a click.
+    origin: usize,
+    /// Where it currently is; the reorder is applied as the pointer crosses tabs
+    /// rather than on release, so the strip previews the result.
+    current: usize,
+    /// Pointer x when the drag began, to require real movement before it counts as a
+    /// drag rather than a click that wobbled.
+    start_x: i32,
+    /// Set once movement passed the threshold.
+    active: bool,
+}
+
+/// How far the pointer must move before a press becomes a drag.
+///
+/// Without this every click on a tab is a one-pixel drag, and a click that happens to
+/// wobble would reorder the strip.
+const DRAG_THRESHOLD: i32 = 6;
+
 /// Fraction of a split adjusted per keyboard resize action.
 const RESIZE_STEP: f32 = 0.02;
 
@@ -115,6 +150,10 @@ pub struct App {
     /// The panel's scrollable body from the last frame, for wheel scrolling and for
     /// clipping rows to it.
     panel_body: Option<Rect>,
+    /// Tab being dragged, and where it would land if released now.
+    dragging_tab: Option<TabDrag>,
+    /// Transient on-screen messages, newest last.
+    toasts: Vec<Notification>,
 
     /// Cursor blink phase and when it last flipped.
     blink_on: bool,
@@ -231,6 +270,8 @@ impl App {
             hovered_close: false,
             panel: None,
             panel_body: None,
+            dragging_tab: None,
+            toasts: Vec::new(),
             blink_on: true,
             blink_at: Instant::now(),
             last_input: Instant::now(),
@@ -477,6 +518,32 @@ impl App {
             })
             .collect();
         let status_items = self.plugins.status_segments();
+        // Built before the `&mut` borrows below, and fade computed here so the
+        // renderer stays free of timing logic.
+        let toasts: Vec<tuz_render::Toast<'_>> = self
+            .toasts
+            .iter()
+            .map(|t| {
+                let elapsed = t.shown_at.elapsed();
+                let opacity = if elapsed < TOAST_HOLD {
+                    1.0
+                } else {
+                    let into_fade = (elapsed - TOAST_HOLD).as_secs_f32();
+                    1.0 - (into_fade / TOAST_FADE.as_secs_f32()).clamp(0.0, 1.0)
+                };
+                tuz_render::Toast {
+                    text: &t.text,
+                    accent: match t.level {
+                        tuz_plugin_api::NotifyLevel::Error => {
+                            theme_error_color(self.settings.theme())
+                        }
+                        tuz_plugin_api::NotifyLevel::Warn => self.settings.theme().normal.yellow,
+                        tuz_plugin_api::NotifyLevel::Info => self.settings.theme().normal.blue,
+                    },
+                    opacity,
+                }
+            })
+            .collect();
         let hovered_button = self.hovered_button;
         let hovered_tab = self.hovered_tab;
         let hovered_close = self.hovered_close;
@@ -649,6 +716,10 @@ impl App {
             widget_end = instances.len() as u32;
 
             tuz_render::draw_scrollbar(instances, &panel.ui, body, theme, colors);
+        }
+        if !toasts.is_empty() {
+            let window = Rect::from_size(gpu.size().0, gpu.size().1);
+            tuz_render::draw_toasts(instances, fonts, &toasts, window, theme, colors);
         }
         let chrome_end = instances.len() as u32;
 
@@ -1013,16 +1084,30 @@ impl App {
                     }
                 }
                 PluginCommand::Notify { message, level } => {
-                    // No on-screen notification surface yet, so this goes to the log
-                    // rather than being silently dropped.
                     match level {
                         tuz_plugin_api::NotifyLevel::Error => log::error!("plugin: {message}"),
                         tuz_plugin_api::NotifyLevel::Warn => log::warn!("plugin: {message}"),
                         tuz_plugin_api::NotifyLevel::Info => log::info!("plugin: {message}"),
                     }
+                    self.notify(message, level);
                 }
                 PluginCommand::SetConfigOverlay { toml } => {
-                    log::debug!("plugin config overlay is not applied yet: {toml}");
+                    match self.settings.apply_overlay(&toml) {
+                        Ok(actions) => {
+                            log::debug!("applied a plugin config overlay");
+                            self.apply_reload_actions(&actions);
+                        }
+                        // Reported rather than silently ignored: a plugin author
+                        // needs to know their overlay was rejected, and the user
+                        // needs to know why their setting did not change.
+                        Err(e) => {
+                            log::warn!("rejected a plugin config overlay: {e}");
+                            self.notify(
+                                format!("Plugin config overlay rejected: {e}"),
+                                tuz_plugin_api::NotifyLevel::Warn,
+                            );
+                        }
+                    }
                 }
                 PluginCommand::ReloadConfig => self.reload_config(),
                 PluginCommand::Quit => self.exit_requested = true,
@@ -1140,6 +1225,46 @@ impl App {
         for field in &actions.restart_required {
             log::warn!("`{field}` only takes effect after a restart");
         }
+    }
+
+    /// Show a transient message.
+    fn notify(&mut self, text: String, level: tuz_plugin_api::NotifyLevel) {
+        self.toasts.push(Notification {
+            text,
+            level,
+            shown_at: Instant::now(),
+        });
+        // Oldest first out, so a burst shows the most recent rather than the first
+        // four and then nothing.
+        while self.toasts.len() > MAX_TOASTS {
+            self.toasts.remove(0);
+        }
+        self.request_redraw();
+    }
+
+    /// Drop expired toasts, returning when the next one changes appearance.
+    ///
+    /// Returned so the event loop can sleep exactly until the next fade step instead
+    /// of polling, which is the same approach the cursor blink uses.
+    fn update_toasts(&mut self) -> Option<Instant> {
+        let lifetime = TOAST_HOLD + TOAST_FADE;
+        let before = self.toasts.len();
+        self.toasts.retain(|t| t.shown_at.elapsed() < lifetime);
+        if self.toasts.len() != before {
+            self.request_redraw();
+        }
+
+        let next = self.toasts.iter().map(|t| t.shown_at + lifetime).min();
+
+        // While any toast is fading it needs a frame per step, so wake sooner.
+        if self
+            .toasts
+            .iter()
+            .any(|t| t.shown_at.elapsed() >= TOAST_HOLD)
+        {
+            return Some(Instant::now() + Duration::from_millis(50));
+        }
+        next
     }
 
     /// Act on a tab strip button.
@@ -1428,6 +1553,12 @@ impl App {
         if !pressed {
             self.selecting = None;
             self.dragging = None;
+            if let Some(drag) = self.dragging_tab.take() {
+                if drag.active && drag.current != drag.origin {
+                    log::debug!("moved tab {} to {}", drag.origin, drag.current);
+                    self.request_redraw();
+                }
+            }
         }
 
         // The panel is modal: a click inside it goes to a widget, and a click outside
@@ -1483,6 +1614,17 @@ impl App {
                     self.request_redraw();
                     return;
                 }
+            }
+
+            // A press on a tab may become a drag; the reorder only happens once the
+            // pointer has actually moved.
+            if let Some(index) = frame.tab_at(x, y) {
+                self.dragging_tab = Some(TabDrag {
+                    origin: index,
+                    current: index,
+                    start_x: x,
+                    active: false,
+                });
             }
 
             // A click on the tab strip selects that tab and goes no further; letting
@@ -1581,6 +1723,11 @@ impl App {
             self.request_redraw();
         }
 
+        if self.dragging_tab.is_some() {
+            self.drag_tab(x as i32, y as i32);
+            return;
+        }
+
         if let Some(path) = self.dragging.clone() {
             self.drag_divider(&path, x, y);
             return;
@@ -1632,6 +1779,48 @@ impl App {
         self.hovered_tab = tab;
         self.hovered_close = close;
         changed
+    }
+
+    /// Reorder tabs as a drag passes over them.
+    ///
+    /// Applied live rather than on release so the strip previews where the tab will
+    /// land — a drag that only commits at the end gives no feedback about what it is
+    /// about to do.
+    fn drag_tab(&mut self, x: i32, y: i32) {
+        let Some(mut drag) = self.dragging_tab else {
+            return;
+        };
+
+        if !drag.active {
+            if (x - drag.start_x).abs() < DRAG_THRESHOLD {
+                return;
+            }
+            drag.active = true;
+        }
+
+        let Some(frame) = self.frame.as_ref() else {
+            return;
+        };
+        // Clamped to the strip's vertical band so a drag that wanders into the panes
+        // still reorders rather than stopping dead.
+        let y = y.clamp(frame.tab_bar.y, frame.tab_bar.bottom() - 1);
+
+        let target = match frame.tab_at(x, y) {
+            Some(index) => index,
+            // Past the last tab means the end; before the first means the start.
+            None if x >= frame.tab_bar.right() => self.layout.tab_count().saturating_sub(1),
+            None if x <= frame.tab_bar.x => 0,
+            None => drag.current,
+        };
+
+        if target != drag.current && self.layout.move_tab(drag.current, target) {
+            drag.current = target;
+            self.dragging_tab = Some(drag);
+            self.relayout();
+            self.request_redraw();
+            return;
+        }
+        self.dragging_tab = Some(drag);
     }
 
     /// Move a split divider to follow the pointer.
@@ -1918,6 +2107,11 @@ fn panel_key(chord: &tuz_input::KeyChord) -> Option<UiKey> {
     })
 }
 
+/// The theme's error colour for a toast accent.
+fn theme_error_color(theme: &tuz_config::Theme) -> tuz_config::Rgba {
+    theme.normal.red
+}
+
 /// Translate a plugin direction into the layout's own.
 fn to_direction(direction: tuz_plugin_api::Direction) -> Direction {
     match direction {
@@ -2084,8 +2278,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
-        match self.update_blink() {
-            // Sleep exactly until the cursor needs to flip.
+        // Whichever wants a frame sooner decides when to wake.
+        let blink = self.update_blink();
+        let toast = self.update_toasts();
+        match [blink, toast].into_iter().flatten().min() {
             Some(next) => event_loop.set_control_flow(ControlFlow::WaitUntil(next)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }

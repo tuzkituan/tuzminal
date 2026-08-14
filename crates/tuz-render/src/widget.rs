@@ -9,7 +9,7 @@
 
 use crate::instance::{ColorSpace, Instance};
 use crate::text::{self, Align};
-use tuz_config::Theme;
+use tuz_config::{Rgba, Theme};
 use tuz_font::{FontSystem, Style};
 use tuz_layout::Rect;
 use tuz_ui::{Placed, Ui, Widget, WidgetId};
@@ -396,6 +396,109 @@ fn draw_row_text(
                 );
             }
         }
+    }
+}
+
+/// A transient message shown over the terminal.
+pub struct Toast<'a> {
+    pub text: &'a str,
+    /// Tints the left edge: info, warning or error.
+    pub accent: Rgba,
+    /// 0.0 fully faded, 1.0 fully opaque. Drives the fade-out.
+    pub opacity: f32,
+}
+
+/// Draw toasts stacked from the bottom-right.
+///
+/// Bottom-right because the top-left is where terminal output actually is; a
+/// notification over the prompt would cover the thing the user is looking at.
+pub fn draw_toasts(
+    out: &mut Vec<Instance>,
+    fonts: &mut FontSystem,
+    toasts: &[Toast<'_>],
+    window: Rect,
+    theme: &Theme,
+    colors: ColorSpace,
+) {
+    if toasts.is_empty() {
+        return;
+    }
+
+    let metrics = fonts.metrics();
+    let height = metrics.height + 12;
+    let margin = 12;
+    let accent_width = 3.0;
+    let mut bottom = window.bottom() - margin;
+
+    for toast in toasts {
+        let text_width = text::measure(toast.text, metrics.width as f32) as u32;
+        let width = (text_width + (PADDING * 4.0) as u32).min(window.width.saturating_sub(24));
+        let rect = Rect::new(
+            window.right() - width as i32 - margin,
+            bottom - height as i32,
+            width,
+            height,
+        );
+        // Stop stacking once they would run off the top rather than drawing over
+        // the tab bar.
+        if rect.y < window.y {
+            break;
+        }
+
+        let fade = |mut c: [f32; 4]| {
+            c[3] *= toast.opacity.clamp(0.0, 1.0);
+            c
+        };
+
+        out.push(Instance::solid(
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+            fade(colors.convert_opaque(theme.background_focused())),
+        ));
+        // Accent stripe down the left edge, which is how the severity reads at a
+        // glance without colouring the whole box.
+        out.push(Instance::solid(
+            rect.x as f32,
+            rect.y as f32,
+            accent_width,
+            rect.height as f32,
+            fade(colors.convert_opaque(toast.accent)),
+        ));
+
+        let text_rect = Rect::new(
+            rect.x + accent_width as i32,
+            rect.y,
+            rect.width.saturating_sub(accent_width as u32),
+            rect.height,
+        );
+        let mut color = colors.convert_opaque(theme.foreground);
+        color[3] *= toast.opacity.clamp(0.0, 1.0);
+
+        let shown = text::truncate(
+            toast.text,
+            text_rect.width as f32 - PADDING * 2.0,
+            metrics.width as f32,
+        );
+        let baseline = rect.y as f32
+            + ((rect.height as f32 - metrics.height as f32) / 2.0).max(0.0)
+            + metrics.ascent;
+        text::draw(
+            out,
+            fonts,
+            &shown,
+            text_rect.x as f32 + PADDING,
+            baseline,
+            theme.foreground,
+            ColorSpace {
+                srgb: colors.srgb,
+                opacity: toast.opacity,
+            },
+            Style::Regular,
+        );
+
+        bottom = rect.y - 6;
     }
 }
 
