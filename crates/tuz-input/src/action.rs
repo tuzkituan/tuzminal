@@ -60,6 +60,7 @@ pub enum Action {
     OpenSettings,
     OpenExplorer,
     OpenHelp,
+    OpenPlugins,
     Quit,
 
     /// Send a literal byte string to the focused pane. Not nameable in config's
@@ -112,6 +113,7 @@ const NAMED_ACTIONS: &[(&str, Action)] = &[
     ("open_settings", Action::OpenSettings),
     ("open_explorer", Action::OpenExplorer),
     ("open_help", Action::OpenHelp),
+    ("open_plugins", Action::OpenPlugins),
     ("quit", Action::Quit),
 ];
 

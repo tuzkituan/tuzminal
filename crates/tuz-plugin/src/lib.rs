@@ -135,6 +135,63 @@ impl Host {
             .collect()
     }
 
+    /// Deliver a segment click to the plugin that published it.
+    ///
+    /// Targeted rather than broadcast: a click belongs to one segment, and sending it
+    /// to every plugin would make two plugins with a segment called `open` both act
+    /// on one press. The qualified form is `plugin.id`, matching how commands and
+    /// keybinds are namespaced.
+    pub fn click_status_segment(&mut self, qualified: &str) -> Vec<tuz_plugin_api::Command> {
+        let Some((plugin_name, id)) = qualified.split_once('.') else {
+            return Vec::new();
+        };
+        let Some(index) = self
+            .plugins
+            .iter()
+            .position(|p| !p.disabled && p.manifest.name == plugin_name)
+        else {
+            return Vec::new();
+        };
+
+        let event = Event::StatusSegmentClick { id: id.to_owned() };
+        let plugin = &mut self.plugins[index];
+        match plugin.runtime.dispatch(&event) {
+            Ok(commands) => {
+                for command in &commands {
+                    if let Command::SetStatusSegments { segments } = command {
+                        plugin.status = segments.clone();
+                    }
+                }
+                commands
+            }
+            Err(e) => {
+                log::warn!("plugin `{}` failed handling a click: {e}", plugin.manifest.name);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Status segments from all plugins, paired with the qualified id of any that
+    /// can be clicked.
+    ///
+    /// The qualification happens here rather than in the plugin so a plugin cannot
+    /// claim another's namespace by choosing a clever id.
+    pub fn status_segments_with_owner(&self) -> Vec<(tuz_plugin_api::StatusSegment, Option<String>)> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.disabled)
+            .flat_map(|p| {
+                p.status.iter().map(move |segment| {
+                    let owner = segment
+                        .id
+                        .as_ref()
+                        .map(|id| format!("{}.{id}", p.manifest.name));
+                    (segment.clone(), owner)
+                })
+            })
+            .collect()
+    }
+
     /// Status segments from all plugins, in load order.
     pub fn status_segments(&self) -> Vec<tuz_plugin_api::StatusSegment> {
         self.plugins
@@ -148,6 +205,21 @@ impl Host {
     ///
     /// A plugin that fails to load is reported and skipped; one broken plugin must
     /// not cost the user the others.
+    /// Drop every loaded plugin and load again from disk.
+    ///
+    /// Exists so enabling or disabling a plugin takes effect now rather than at the
+    /// next launch. Dropping the runtimes discards their state — a plugin that was
+    /// counting something starts over — which is the honest meaning of toggling it
+    /// off and on, and is why this is not called on an ordinary config reload.
+    ///
+    /// The caller must rebuild the keymap afterwards: registered commands and
+    /// keybinds are cleared here and re-registered by the loads.
+    pub fn reload(&mut self, dirs: &[PathBuf], cfg: &tuz_config::Plugins) -> Vec<PluginError> {
+        self.plugins.clear();
+        self.keybinds.clear();
+        self.load_all(dirs, cfg)
+    }
+
     pub fn load_all(&mut self, dirs: &[PathBuf], cfg: &tuz_config::Plugins) -> Vec<PluginError> {
         let mut errors = Vec::new();
 
@@ -247,11 +319,44 @@ impl Host {
             disabled: false,
         });
 
-        // Startup runs immediately so the plugin can register its keybinds and
-        // commands before the keymap is built.
-        let commands = self.dispatch(&Event::Startup);
-        self.apply_registrations(commands.clone());
+        // Startup goes to *this* plugin only. Broadcasting it re-ran every already
+        // loaded plugin's `on_startup` once per subsequent load, and — because
+        // registrations were credited to the last plugin in the list — filed their
+        // keybinds under whichever plugin happened to load last.
+        let index = self.plugins.len() - 1;
+        let commands = self.dispatch_to(index, &Event::Startup);
+        self.apply_registrations_for(index, commands);
         Ok(name)
+    }
+
+    /// Deliver an event to one plugin, by index.
+    ///
+    /// The single-plugin half of `dispatch`, so a load can start one plugin without
+    /// restarting the ones already running.
+    fn dispatch_to(&mut self, index: usize, event: &Event) -> Vec<Command> {
+        let Some(plugin) = self.plugins.get_mut(index) else {
+            return Vec::new();
+        };
+        match plugin.runtime.dispatch(event) {
+            Ok(commands) => {
+                for command in &commands {
+                    if let Command::SetStatusSegments { segments } = command {
+                        plugin.status = segments.clone();
+                    }
+                }
+                plugin.failures = 0;
+                commands
+            }
+            Err(e) => {
+                log::warn!("plugin `{}` failed: {e}", plugin.manifest.name);
+                plugin.failures += 1;
+                if plugin.failures >= FAILURE_LIMIT {
+                    log::warn!("disabling plugin `{}`", plugin.manifest.name);
+                    plugin.disabled = true;
+                }
+                Vec::new()
+            }
+        }
     }
 
     /// Deliver an event to every interested plugin and collect their commands.
@@ -356,24 +461,36 @@ impl Host {
     /// Kept out of the generic command drain because these must be applied before
     /// the keymap is built, not queued for the next frame.
     pub fn apply_registrations(&mut self, commands: Vec<Command>) {
+        // Kept for callers that register on behalf of the most recent load. New code
+        // should name the plugin: attributing by position is what filed one plugin's
+        // keybinds under another's name.
+        let index = self.plugins.len().saturating_sub(1);
+        self.apply_registrations_for(index, commands);
+    }
+
+    /// Record registrations against the plugin that emitted them.
+    fn apply_registrations_for(&mut self, index: usize, commands: Vec<Command>) {
+        let Some(name) = self.plugins.get(index).map(|p| p.manifest.name.clone()) else {
+            return;
+        };
+
         for command in commands {
             match command {
-                Command::RegisterCommand { name, .. } => {
+                Command::RegisterCommand { name: command, .. } => {
                     // Namespaced so two plugins cannot collide on a common word
                     // like "toggle".
-                    if let Some(plugin) = self.plugins.last_mut() {
-                        let qualified = format!("{}.{}", plugin.manifest.name, name);
+                    let qualified = format!("{name}.{command}");
+                    if let Some(plugin) = self.plugins.get_mut(index) {
                         if !plugin.registered_commands.contains(&qualified) {
                             plugin.registered_commands.push(qualified);
                         }
                     }
                 }
                 Command::RegisterKeybind { chord, command } => {
-                    let qualified = match self.plugins.last() {
-                        Some(p) if !command.contains('.') => {
-                            format!("{}.{}", p.manifest.name, command)
-                        }
-                        _ => command,
+                    let qualified = if command.contains('.') {
+                        command
+                    } else {
+                        format!("{name}.{command}")
                     };
                     self.keybinds.insert(chord, qualified);
                 }
@@ -403,6 +520,7 @@ pub fn event_name(event: &Event) -> &'static str {
         Event::PaneClosed { .. } => "pane_closed",
         Event::Osc { .. } => "osc",
         Event::StatusBarRender => "status_bar_render",
+        Event::StatusSegmentClick { .. } => "status_segment_click",
         Event::Command { .. } => "command",
         // `Event` is non_exhaustive; an unnamed event is simply not deliverable
         // by name rather than a compile error in downstream builds.
@@ -785,6 +903,7 @@ mod tests {
     #[test]
     fn status_segments_are_captured_from_dispatch() {
         let segments = vec![StatusSegment {
+            id: None,
             text: "cpu 4%".to_owned(),
             foreground: None,
             background: None,
@@ -806,6 +925,7 @@ mod tests {
             manifest("bar", &[]),
             stub(vec![Command::SetStatusSegments {
                 segments: vec![StatusSegment {
+                    id: None,
                     text: "x".to_owned(),
                     foreground: None,
                     background: None,
@@ -996,4 +1116,55 @@ entry = "init.lua"
         // A user with no plugins directory is the normal case.
         assert!(discover(&[PathBuf::from("/nonexistent/tuz-plugins")]).is_empty());
     }
+    /// Two plugins must not have their registrations mixed up.
+    ///
+    /// They were: `Startup` was broadcast on every load, so an earlier plugin's
+    /// `on_startup` ran again each time a later one loaded, and the commands it
+    /// returned were credited to whichever plugin was last in the list.
+    #[test]
+    fn each_plugins_registrations_are_filed_under_its_own_name() {
+        let dir = std::env::temp_dir().join(format!("tuz-two-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (name, chord) in [("alpha", "ctrl+shift+1"), ("omega", "ctrl+shift+2")] {
+            let plugin = dir.join(name);
+            std::fs::create_dir_all(&plugin).unwrap();
+            std::fs::write(
+                plugin.join("plugin.toml"),
+                format!(
+                    "name = \"{name}\"\nversion = \"0.1.0\"\napi_version = {}\n\
+                     runtime = \"lua\"\nentry = \"init.lua\"\n",
+                    tuz_plugin_api::API_VERSION
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                plugin.join("init.lua"),
+                format!(
+                    "local M = {{}}\n\
+                     function M.on_startup(ctx)\n\
+                       ctx.register_command(\"go\", \"\")\n\
+                       ctx.register_keybind(\"{chord}\", \"go\")\n\
+                     end\n\
+                     return M\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut host = Host::disabled();
+        let errors = host.load_all(std::slice::from_ref(&dir), &tuz_config::Plugins::default());
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let binds = host.keybinds();
+        assert_eq!(binds.get("ctrl+shift+1").map(String::as_str), Some("alpha.go"));
+        assert_eq!(binds.get("ctrl+shift+2").map(String::as_str), Some("omega.go"));
+
+        let names = host.command_names();
+        assert!(names.contains(&"alpha.go".to_owned()), "{names:?}");
+        assert!(names.contains(&"omega.go".to_owned()), "{names:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

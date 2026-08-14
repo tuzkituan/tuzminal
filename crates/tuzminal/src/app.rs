@@ -120,6 +120,23 @@ pub enum UserEvent {
     ConfigChanged,
     /// A PTY produced output or an event.
     Wakeup,
+    /// A folder was chosen in the system file dialog, or the dialog was cancelled.
+    ///
+    /// Arrives as an event rather than a return value because the dialog runs on its
+    /// own thread: under Wayland it is a D-Bus round trip to the desktop portal,
+    /// which can take seconds, and waiting for it on the event loop would freeze the
+    /// window until the user picked something.
+    FolderPicked {
+        purpose: FolderPurpose,
+        path: Option<std::path::PathBuf>,
+    },
+}
+
+/// Which field a picked folder belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderPurpose {
+    ImportPlugin,
+    ExportPlugins,
 }
 
 pub struct App {
@@ -164,13 +181,11 @@ pub struct App {
     resize_cursor: Option<CursorIcon>,
     /// The focused pane's working directory, for the status bar.
     cwd: crate::status::CwdCache,
-    /// Editors found on `PATH` at startup, offered as buttons in the status bar.
-    ides: Vec<crate::ide::Ide>,
-    /// Where those buttons were drawn last frame, for hit-testing.
+    /// Clickable status segments and where they were drawn last frame.
     ///
     /// Recorded from the draw rather than recomputed, so what is clickable is exactly
-    /// what is on screen.
-    ide_hits: Vec<(crate::ide::Ide, Rect)>,
+    /// what is on screen. The `String` is the qualified `plugin.id`.
+    ide_hits: Vec<(String, Rect)>,
     /// Shell for the next session, when one was chosen from the menu.
     ///
     /// A one-shot rather than a field on the pane: it is only ever read by the
@@ -183,6 +198,10 @@ pub struct App {
     menu_rect: Option<Rect>,
     /// The shortcut reference, when its tab is open.
     help: Option<crate::help::HelpPage>,
+    /// The plugins page, when its tab is open.
+    plugins_page: Option<crate::plugins::PluginsPage>,
+    /// Its scrollable body from the last frame, for the wheel and `scroll_to_focus`.
+    plugins_body: Option<Rect>,
     /// The file explorer, when open. `None` means closed.
     sidebar: Option<crate::explorer::Explorer>,
     /// Whether the sidebar has the keyboard.
@@ -333,7 +352,8 @@ impl App {
             menu: None,
             menu_rect: None,
             help: None,
-            ides: crate::ide::available(),
+            plugins_page: None,
+            plugins_body: None,
             ide_hits: Vec::new(),
             sidebar: None,
             sidebar_focused: false,
@@ -395,7 +415,7 @@ impl App {
         // that is not on screen. An empty strip taking a row is worse than no strip.
         if matches!(
             self.layout.active_kind(),
-            TabKind::Settings | TabKind::Help
+            TabKind::Settings | TabKind::Help | TabKind::Plugins
         ) {
             return 0;
         }
@@ -491,8 +511,10 @@ impl App {
             out.push(ChromeButton::Explorer);
         }
         match self.layout.active_kind() {
-            TabKind::Settings => out.push(ChromeButton::Settings),
-            TabKind::Help => out.push(ChromeButton::Help),
+            // All three live behind one button now, so it lights for any of them.
+            TabKind::Settings | TabKind::Help | TabKind::Plugins => {
+                out.push(ChromeButton::AppMenu)
+            }
             TabKind::Terminal => {}
         }
         out
@@ -507,8 +529,9 @@ impl App {
             buttons.push(ChromeButton::Maximize);
             buttons.push(ChromeButton::Minimize);
         }
-        buttons.push(ChromeButton::Help);
-        buttons.push(ChromeButton::Settings);
+        // Settings, shortcuts and plugins share one button. Three separate icons for
+        // three pages you open occasionally crowded out the ones you press often.
+        buttons.push(ChromeButton::AppMenu);
         buttons.push(ChromeButton::Explorer);
         buttons.push(ChromeButton::SplitDown);
         buttons.push(ChromeButton::SplitRight);
@@ -531,6 +554,7 @@ impl App {
         match tab.kind() {
             TabKind::Settings => return "Settings".to_owned(),
             TabKind::Help => return "Shortcuts".to_owned(),
+            TabKind::Plugins => return "Plugins".to_owned(),
             TabKind::Terminal => {}
         }
         if let Some(title) = self.titles.get(&tab.focus()) {
@@ -612,6 +636,9 @@ impl App {
         ) {
             Ok(session) => {
                 self.sessions.insert(pane, session);
+                self.notify_plugins(PluginEvent::PaneOpened {
+                    pane: tuz_plugin_api::PaneId(pane.0),
+                });
             }
             Err(e) => {
                 log::error!("{pane}: failed to start a shell: {e}");
@@ -739,7 +766,6 @@ impl App {
                 i != active_tab && tab.panes().iter().any(|p| self.activity.contains(p))
             })
             .collect();
-        let status_items = self.plugins.status_segments();
         // Built before the `&mut` borrows below, and fade computed here so the
         // renderer stays free of timing logic.
         let toasts: Vec<tuz_render::Toast<'_>> = self
@@ -781,10 +807,12 @@ impl App {
                 )
             });
 
-        let ides = self.ides.clone();
         let pressed_button = self.pressed_button;
         let hovered_ide = self.hovered_ide;
         let pressed_ide = self.pressed_ide;
+        // Segment plus the qualified id of the plugin that owns it, when it is one
+        // that can be pressed.
+        let status_owned = self.plugins.status_segments_with_owner();
         let active_buttons = self.active_buttons();
 
         // Same reason as the settings widgets: building rows needs `&self`, and the
@@ -798,6 +826,17 @@ impl App {
                     self.sidebar_focused,
                 )
             });
+
+        let plugins_widgets: Option<(Vec<Widget>, Vec<Widget>)> =
+            self.plugins_page.as_ref().map(|page| {
+                (
+                    page.widgets(self.settings.config()),
+                    page.footer_widgets(),
+                )
+            });
+        let plugins_page_rect: Option<Rect> = (self.layout.active_kind() == TabKind::Plugins)
+            .then(|| frame.panes.first().map(|p| p.rect))
+            .flatten();
 
         let help_widgets: Option<Vec<Widget>> = self
             .help
@@ -962,17 +1001,19 @@ impl App {
             }
         }
 
-        let mut ide_hits: Vec<(crate::ide::Ide, Rect)> = Vec::new();
+        let mut ide_hits: Vec<(String, Rect)> = Vec::new();
         if frame.status_bar.height > 0 {
-            // The editor buttons sit to the right of any plugin segments, nearest the
-            // corner, because they are the only part of the bar you press.
-            let ide_labels: Vec<String> = ides.iter().map(|ide| ide.icon.to_owned()).collect();
-
-            // The same three states as the toolbar buttons, expressed through the
-            // per-segment color overrides the status bar already supports rather than
-            // by teaching it a second notion of hovering.
-            let ide_colors: Vec<(Option<String>, Option<String>)> = (0..ides.len())
-                .map(|i| {
+            // Clickable segments are drawn like buttons; the rest are text. The
+            // built-in editor buttons used to live here; they ship as a plugin now,
+            // which is why this no longer special-cases anything of its own.
+            let clickable: Vec<bool> = status_owned.iter().map(|(_, o)| o.is_some()).collect();
+            let seg_colors: Vec<(Option<String>, Option<String>)> = clickable
+                .iter()
+                .enumerate()
+                .map(|(i, is_button)| {
+                    if !is_button {
+                        return (None, None);
+                    }
                     if pressed_ide == Some(i) {
                         (
                             Some(theme.background.to_hex()),
@@ -984,25 +1025,20 @@ impl App {
                             Some(theme.background_focused().to_hex()),
                         )
                     } else {
-                        (Some(theme.bright.black.to_hex()), None)
+                        (None, None)
                     }
                 })
                 .collect();
 
-            let mut right: Vec<tuz_render::StatusItem<'_>> = ide_labels
+            let right: Vec<tuz_render::StatusItem<'_>> = status_owned
                 .iter()
-                .zip(&ide_colors)
-                .map(|(text, (fg, bg))| tuz_render::StatusItem {
-                    text,
-                    foreground: fg.as_deref(),
-                    background: bg.as_deref(),
+                .zip(&seg_colors)
+                .map(|((segment, _), (fg, bg))| tuz_render::StatusItem {
+                    text: &segment.text,
+                    foreground: fg.as_deref().or(segment.foreground.as_deref()),
+                    background: bg.as_deref().or(segment.background.as_deref()),
                 })
                 .collect();
-            right.extend(status_items.iter().map(|segment| tuz_render::StatusItem {
-                text: &segment.text,
-                foreground: segment.foreground.as_deref(),
-                background: segment.background.as_deref(),
-            }));
 
             let left: Vec<tuz_render::StatusItem<'_>> = status_left
                 .iter()
@@ -1022,11 +1058,12 @@ impl App {
                 colors,
                 radius,
             );
-            // Only the leading entries are ours; the rest belong to plugins.
-            ide_hits = ides
+            // Every clickable segment, paired with where it was drawn. Segments with
+            // no id are skipped: a clock should not swallow a press.
+            ide_hits = status_owned
                 .iter()
-                .copied()
                 .zip(rects)
+                .filter_map(|((_, owner), rect)| owner.clone().map(|id| (id, rect)))
                 .collect();
         }
         // The sidebar sits in its own column, carved out of the pane body, so it
@@ -1103,6 +1140,58 @@ impl App {
                     }),
                 ));
             }
+        }
+
+        // The plugins page: the same shape as settings — scrolling rows, a pinned
+        // footer — so it reuses that path rather than growing a third one.
+        let mut plugins_body: Option<Rect> = None;
+        let mut plugins_start = 0u32;
+        let mut plugins_end = 0u32;
+        if let (Some((widgets, footer)), Some(rect), Some(page)) = (
+            plugins_widgets,
+            plugins_page_rect,
+            self.plugins_page.as_mut(),
+        ) {
+            tuz_render::draw_page_frame(instances, rect, theme, colors, radius);
+            let body = tuz_render::draw_panel_title(
+                instances,
+                fonts,
+                rect,
+                "Plugins",
+                theme,
+                colors,
+                cell.height as f32,
+            );
+            page.ui.layout_split_with(
+                &widgets,
+                &footer,
+                body,
+                tuz_ui::Metrics::from_cell(cell.width, cell.height),
+            );
+
+            let footer_area = page.ui.footer_area();
+            let scroll_area = Rect::new(
+                body.x,
+                body.y,
+                body.width,
+                body.height.saturating_sub(footer_area.height),
+            );
+            plugins_body = Some(scroll_area);
+            tuz_render::draw_footer_divider(instances, footer_area, theme, colors, radius);
+
+            plugins_start = instances.len() as u32;
+            tuz_render::draw_widgets_in(instances, fonts, page.ui.body(), &page.ui, theme, colors);
+            plugins_end = instances.len() as u32;
+
+            tuz_render::draw_widgets_in(
+                instances,
+                fonts,
+                &page.ui.placed()[page.ui.body().len()..],
+                &page.ui,
+                theme,
+                colors,
+            );
+            tuz_render::draw_scrollbar(instances, &page.ui, scroll_area, theme, colors);
         }
 
         // The reference page: rows and a title, no footer and nothing to edit.
@@ -1258,6 +1347,21 @@ impl App {
             }
             if chrome_end > divider_start {
                 pass.set_scissor_rect(0, 0, width, height);
+                if plugins_end > plugins_start {
+                    if let Some(body) = plugins_body {
+                        renderer.draw(pass, divider_start..plugins_start);
+                        pass.set_scissor_rect(
+                            body.x.max(0) as u32,
+                            body.y.max(0) as u32,
+                            body.width.min(width),
+                            body.height.min(height),
+                        );
+                        renderer.draw(pass, plugins_start..plugins_end);
+                        pass.set_scissor_rect(0, 0, width, height);
+                        renderer.draw(pass, plugins_end..chrome_end);
+                        return;
+                    }
+                }
                 if help_end > help_start {
                     if let Some(body) = help_body {
                         renderer.draw(pass, divider_start..help_start);
@@ -1297,6 +1401,7 @@ impl App {
         self.panel_body = panel_body;
         self.ide_hits = ide_hits;
         self.menu_rect = menu_rect;
+        self.plugins_body = plugins_body;
 
         match outcome {
             FrameOutcome::Presented | FrameOutcome::Skipped => {}
@@ -1318,6 +1423,12 @@ impl App {
             }
             ReloadOutcome::Applied(actions) => {
                 log::info!("config reloaded");
+
+                // Notified here rather than at the keybinding, which was the only
+                // path that told plugins. Editing `config.toml` in an editor is how
+                // most reloads happen, and `on_config_reload` never ran for any of
+                // them.
+                self.notify_plugins(PluginEvent::ConfigReload);
 
                 if actions.rebind_keys {
                     self.keymap = build_keymap(&self.settings, &self.plugins);
@@ -1404,6 +1515,7 @@ impl App {
             }
             OpenExplorer => self.toggle_explorer(),
             OpenHelp => self.toggle_help(),
+            OpenPlugins => self.toggle_plugins(),
 
             SplitRight => self.split(Direction::Right),
             SplitLeft => self.split(Direction::Left),
@@ -1462,19 +1574,19 @@ impl App {
             }
             NextTab => {
                 self.layout.next_tab();
-                self.clear_activity_for_active_tab();
+                self.on_tab_activated();
                 self.relayout();
                 self.request_redraw();
             }
             PrevTab => {
                 self.layout.prev_tab();
-                self.clear_activity_for_active_tab();
+                self.on_tab_activated();
                 self.relayout();
                 self.request_redraw();
             }
             SelectTab(n) => {
                 if self.layout.select_tab((n as usize).saturating_sub(1)) {
-                    self.clear_activity_for_active_tab();
+                    self.on_tab_activated();
                     self.relayout();
                     self.request_redraw();
                 }
@@ -1651,10 +1763,18 @@ impl App {
     }
 
     /// Forget activity for the tab now on screen: you are looking at it.
-    fn clear_activity_for_active_tab(&mut self) {
+    /// Everything that must happen when a different tab becomes the visible one.
+    ///
+    /// One function rather than a call to each half at seven separate sites: the
+    /// plugin notification was missing entirely, and adding it beside every existing
+    /// `clear_activity` call would have left the settings, help and explorer paths
+    /// out, since those switch tabs without clearing activity.
+    fn on_tab_activated(&mut self) {
         for pane in self.layout.visible_panes() {
             self.activity.remove(&pane);
         }
+        let index = self.layout.active_index() as u32;
+        self.notify_plugins(PluginEvent::TabSwitch { index });
     }
 
     /// Set the sidebar width from a dragged right edge, in pixels.
@@ -1679,37 +1799,6 @@ impl App {
         // its own watcher. The settings page is where it becomes permanent.
         let actions = self.settings.modify(|c| c.explorer.width = cells);
         self.apply_reload_actions(&actions);
-        self.request_redraw();
-    }
-
-    /// Open the current target in `ide`.
-    ///
-    /// The target is whatever the explorer has selected, falling back to the focused
-    /// shell's directory — pressing "VS Code" with nothing selected should open the
-    /// project you are standing in, not your home directory.
-    fn open_in_ide(&mut self, ide: crate::ide::Ide) {
-        let selected = self
-            .sidebar
-            .as_ref()
-            .and_then(|e| e.selected().map(|entry| entry.path.clone()));
-
-        let target = selected.unwrap_or_else(|| {
-            let cwd = self
-                .focused_session()
-                .and_then(|s| s.child_pid())
-                .and_then(crate::proc::working_directory);
-            crate::ide::fallback_target(cwd.as_deref())
-        });
-
-        let bytes = crate::ide::open_command(ide, &target);
-        if let Some(session) = self.focused_session() {
-            session.write(bytes);
-        } else {
-            self.notify(
-                "no shell to run the editor from".to_owned(),
-                tuz_plugin_api::NotifyLevel::Warn,
-            );
-        }
         self.request_redraw();
     }
 
@@ -1894,7 +1983,11 @@ impl App {
             return;
         }
 
-        self.menu = Some(crate::menu::Menu::new(anchor, items));
+        self.menu = Some(crate::menu::Menu::new(
+            crate::menu::MenuKind::NewTabShell,
+            anchor,
+            items,
+        ));
         self.request_redraw();
     }
 
@@ -1935,11 +2028,52 @@ impl App {
         let choice = self
             .menu
             .as_ref()
-            .and_then(|m| m.selected().map(|item| item.value.clone()));
+            .and_then(|m| m.selected().map(|item| (m.kind, item.value.clone())));
         self.close_menu();
-        if let Some(shell) = choice {
-            self.new_tab_with(Some(shell));
+
+        let Some((kind, value)) = choice else {
+            return;
+        };
+        match kind {
+            crate::menu::MenuKind::NewTabShell => self.new_tab_with(Some(value)),
+            crate::menu::MenuKind::AppMenu => match value.as_str() {
+                "settings" => self.open_settings(),
+                "help" => self.toggle_help(),
+                "plugins" => self.toggle_plugins(),
+                other => log::debug!("unknown menu entry `{other}`"),
+            },
         }
+    }
+
+    /// Open the menu that groups the pages you reach occasionally.
+    fn toggle_app_menu(&mut self) {
+        if self.menu.is_some() {
+            self.close_menu();
+            return;
+        }
+        let Some(anchor) = self.frame.as_ref().and_then(|f| {
+            f.actions
+                .iter()
+                .find(|(b, _)| *b == ChromeButton::AppMenu)
+                .map(|(_, rect)| *rect)
+        }) else {
+            return;
+        };
+
+        let items = [("Settings", "settings"), ("Shortcuts", "help"), ("Plugins", "plugins")]
+            .into_iter()
+            .map(|(label, value)| crate::menu::MenuItem {
+                label: label.to_owned(),
+                value: value.to_owned(),
+            })
+            .collect();
+
+        self.menu = Some(crate::menu::Menu::new(
+            crate::menu::MenuKind::AppMenu,
+            anchor,
+            items,
+        ));
+        self.request_redraw();
     }
 
     fn close_menu(&mut self) {
@@ -1959,6 +2093,155 @@ impl App {
         self.request_redraw();
     }
 
+    /// Everything on disk, whether or not it loaded.
+    ///
+    /// Built from `discover` rather than from the running host: a disabled plugin is
+    /// never loaded, so a list of loaded plugins could show you how to turn things
+    /// off and never how to turn them back on.
+    fn installed_plugins(&self) -> Vec<crate::plugins::Installed> {
+        let dirs = self.settings.paths().plugin_dirs().to_vec();
+        let running: Vec<&str> = self
+            .plugins
+            .plugins()
+            .iter()
+            .map(|p| p.manifest.name.as_str())
+            .collect();
+
+        tuz_plugin::discover(&dirs)
+            .into_iter()
+            .filter_map(|found| found.ok())
+            .map(|(directory, manifest)| {
+                let problem = if running.contains(&manifest.name.as_str()) {
+                    None
+                } else if !self.settings.config().plugins.enabled {
+                    Some("plugins are off".to_owned())
+                } else {
+                    Some("not loaded".to_owned())
+                };
+                crate::plugins::Installed {
+                    manifest,
+                    directory,
+                    problem,
+                }
+            })
+            .collect()
+    }
+
+    fn toggle_plugins(&mut self) {
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Plugins) {
+            if self.layout.active_kind() == TabKind::Plugins {
+                self.close_plugins();
+                return;
+            }
+            if self.layout.select_tab(index) {
+                self.relayout();
+                self.on_tab_activated();
+            }
+            self.request_redraw();
+            return;
+        }
+        let found = self.installed_plugins();
+        let install_dir = self
+            .settings
+            .paths()
+            .plugin_dirs()
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        self.plugins_page = Some(crate::plugins::PluginsPage::open(found, install_dir));
+        self.layout.new_tab_of(TabKind::Plugins);
+        self.relayout();
+        self.request_redraw();
+    }
+
+    fn close_plugins(&mut self) {
+        self.plugins_page = None;
+        if let Some(index) = self.layout.tab_of_kind(TabKind::Plugins) {
+            if let Some(panes) = self.layout.close_tab(index) {
+                for pane in panes {
+                    self.drop_session(pane);
+                }
+            }
+            if self.layout.is_empty() {
+                self.exit_requested = true;
+                return;
+            }
+            self.relayout();
+        }
+        self.request_redraw();
+    }
+
+    fn plugins_active(&self) -> bool {
+        self.plugins_page.is_some() && self.layout.active_kind() == TabKind::Plugins
+    }
+
+    /// Load plugins again from disk and rebuild the keymap.
+    ///
+    /// Registered keybinds and commands are cleared by the reload, so the keymap has
+    /// to be rebuilt from what comes back or a toggled-off plugin keeps its bindings.
+    fn reload_plugin_host(&mut self) {
+        let dirs = self.settings.paths().plugin_dirs().to_vec();
+        let cfg = self.settings.config().plugins.clone();
+        for error in self.plugins.reload(&dirs, &cfg) {
+            log::warn!("plugin reload: {error}");
+        }
+        self.keymap = build_keymap(&self.settings, &self.plugins);
+
+        // The page lists what is on disk, which an import just changed.
+        let found = self.installed_plugins();
+        if let Some(page) = self.plugins_page.as_mut() {
+            page.refresh(found);
+        }
+    }
+
+    /// Open the system folder chooser, off the event loop.
+    ///
+    /// The dialog is modal to the desktop, not to us: the terminal keeps drawing and
+    /// keeps running shells while it is up. The result comes back through the same
+    /// proxy the PTY threads use.
+    fn pick_folder(&self, purpose: FolderPurpose) {
+        let proxy = self.proxy.clone();
+        let title = match purpose {
+            FolderPurpose::ImportPlugin => "Choose a plugin folder",
+            FolderPurpose::ExportPlugins => "Choose where to export plugins",
+        };
+
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .set_title(title)
+                .pick_folder();
+            // A closed event loop means the terminal is shutting down; dropping the
+            // answer is correct.
+            let _ = proxy.send_event(UserEvent::FolderPicked { purpose, path });
+        });
+    }
+
+    /// Apply an action from the plugins page.
+    fn handle_plugins_action(&mut self, action: tuz_ui::UiAction) {
+        let Some(mut page) = self.plugins_page.take() else {
+            return;
+        };
+        let mut next = self.settings.config().clone();
+        let outcome = page.apply(action, &mut next);
+
+        match outcome {
+            crate::plugins::PluginsOutcome::Continue => {}
+            crate::plugins::PluginsOutcome::ChooseFolder(purpose) => self.pick_folder(purpose),
+            crate::plugins::PluginsOutcome::Toggled => {
+                let actions = self.settings.modify(|c| *c = next);
+                self.apply_reload_actions(&actions);
+                self.reload_plugin_host();
+            }
+            crate::plugins::PluginsOutcome::Close => {
+                self.close_plugins();
+                return;
+            }
+        }
+
+        self.plugins_page = Some(page);
+        self.request_redraw();
+    }
+
     /// Open the shortcut reference, or return to it if it is already open.
     ///
     /// A tab rather than an overlay for the same reason settings is one: you want to
@@ -1972,6 +2255,7 @@ impl App {
             }
             if self.layout.select_tab(index) {
                 self.relayout();
+                self.on_tab_activated();
             }
             self.request_redraw();
             return;
@@ -2092,6 +2376,7 @@ impl App {
         if let Some(index) = self.layout.tab_of_kind(TabKind::Settings) {
             if self.layout.select_tab(index) {
                 self.relayout();
+                self.on_tab_activated();
             }
             self.request_redraw();
             return;
@@ -2358,6 +2643,8 @@ impl App {
             ChromeButton::Settings => self.open_settings(),
             ChromeButton::Explorer => self.toggle_explorer(),
             ChromeButton::Help => self.toggle_help(),
+            ChromeButton::Plugins => self.toggle_plugins(),
+            ChromeButton::AppMenu => self.toggle_app_menu(),
             ChromeButton::SplitRight => self.split(Direction::Right),
             ChromeButton::SplitDown => self.split(Direction::Down),
             ChromeButton::Minimize => {
@@ -2411,6 +2698,9 @@ impl App {
     fn drop_session(&mut self, pane: PaneId) {
         if let Some(mut session) = self.sessions.remove(&pane) {
             session.shutdown();
+            self.notify_plugins(PluginEvent::PaneClosed {
+                pane: tuz_plugin_api::PaneId(pane.0),
+            });
         }
     }
 
@@ -2521,6 +2811,49 @@ impl App {
                 Key::Named(N::End) => self.move_menu(i32::MAX / 2),
                 Key::Named(N::Enter) | Key::Named(N::Space) => self.pick_menu_item(),
                 _ => self.close_menu(),
+            }
+            return;
+        }
+
+        // The plugins page has editable fields and pressable rows, so it routes
+        // exactly like settings rather than like the read-only reference page.
+        if self.plugins_active() {
+            if self.keymap.lookup(&chord) == Some(&Action::OpenPlugins) {
+                self.close_plugins();
+                return;
+            }
+            if !self.modifiers.control_key()
+                && !self.modifiers.alt_key()
+                && !self.modifiers.super_key()
+            {
+                if let Some(text) = event.text.as_deref() {
+                    let mut edited = None;
+                    if let Some(page) = self.plugins_page.as_mut() {
+                        for c in text.chars() {
+                            if let Some(action) = page.ui.type_char(c) {
+                                edited = Some(action);
+                            }
+                        }
+                    }
+                    if let Some(action) = edited {
+                        self.handle_plugins_action(action);
+                        return;
+                    }
+                }
+            }
+            if let Some(key) = panel_key(&chord) {
+                let response = match self.plugins_page.as_mut() {
+                    Some(page) => page.ui.key(key),
+                    None => return,
+                };
+                if let (Some(page), Some(body)) = (self.plugins_page.as_mut(), self.plugins_body) {
+                    page.ui.scroll_to_focus(body);
+                }
+                match response {
+                    tuz_ui::KeyResponse::Close => self.close_plugins(),
+                    tuz_ui::KeyResponse::Action(action) => self.handle_plugins_action(action),
+                    tuz_ui::KeyResponse::Consumed => self.request_redraw(),
+                }
             }
             return;
         }
@@ -2702,7 +3035,21 @@ impl App {
             self.selecting = None;
             self.dragging = None;
             self.dragging_sidebar = None;
-            if self.pressed_button.take().is_some() | self.pressed_ide.take().is_some() {
+            let mut cleared = self.pressed_button.take().is_some();
+            cleared |= self.pressed_ide.take().is_some();
+            // Widget buttons on the tabbed pages, which hold their pressed look only
+            // between press and release.
+            for ui in [
+                self.panel.as_mut().map(|p| &mut p.ui),
+                self.plugins_page.as_mut().map(|p| &mut p.ui),
+                self.help.as_mut().map(|p| &mut p.ui),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                cleared |= ui.set_pressed(None);
+            }
+            if cleared {
                 self.request_redraw();
             }
             if let Some(drag) = self.dragging_tab.take() {
@@ -2758,9 +3105,11 @@ impl App {
                 .iter()
                 .position(|(_, rect)| rect.contains(x, y))
             {
-                let ide = self.ide_hits[index].0;
+                let id = self.ide_hits[index].0.clone();
                 self.pressed_ide = Some(index);
-                self.open_in_ide(ide);
+                let commands = self.plugins.click_status_segment(&id);
+                self.apply_plugin_commands(commands);
+                self.request_redraw();
                 return;
             }
         }
@@ -2789,6 +3138,25 @@ impl App {
             return;
         }
 
+        if self.plugins_active() {
+            let page = frame.panes.first().map(|p| p.rect);
+            if page.is_some_and(|r| r.contains(x, y)) {
+                if !pressed {
+                    return;
+                }
+                if let Some(page) = self.plugins_page.as_mut() {
+                    let hit = page.ui.hit(x, y);
+                    page.ui.set_pressed(hit);
+                }
+                if let Some(action) = self.plugins_page.as_mut().and_then(|p| p.ui.click(x, y)) {
+                    self.handle_plugins_action(action);
+                } else {
+                    self.request_redraw();
+                }
+                return;
+            }
+        }
+
         // The settings page takes clicks that land on it, and only those. It fills a
         // tab rather than floating over the window, so the strip above it must stay
         // live — swallowing everything here would leave no way to click back to a
@@ -2798,6 +3166,10 @@ impl App {
             if page.is_some_and(|r| r.contains(x, y)) {
                 if !pressed {
                     return;
+                }
+                if let Some(panel) = self.panel.as_mut() {
+                    let hit = panel.ui.hit(x, y);
+                    panel.ui.set_pressed(hit);
                 }
                 if let Some(action) = self.panel.as_mut().and_then(|p| p.ui.click(x, y)) {
                     self.handle_panel_action(action);
@@ -2855,7 +3227,7 @@ impl App {
             // it fall through would also start a selection in the pane below.
             if let Some(index) = frame.tab_at(x, y) {
                 if self.layout.select_tab(index) {
-                    self.clear_activity_for_active_tab();
+                    self.on_tab_activated();
                     self.relayout();
                     self.request_redraw();
                 }
@@ -3004,27 +3376,38 @@ impl App {
 
     /// Recompute what the pointer is over, reporting whether anything changed.
     fn update_hover(&mut self, x: i32, y: i32) -> bool {
-        // The settings page occupies a tab, not the whole window, so chrome hover
-        // stays live above it. Copied out so the frame borrow ends before the panel
-        // is borrowed mutably.
-        let page: Option<Rect> = (self.layout.active_kind() == TabKind::Settings)
-            .then(|| {
-                self.frame
-                    .as_ref()
-                    .and_then(|f| f.panes.first().map(|p| p.rect))
-            })
-            .flatten();
+        // A tabbed page occupies its tab, not the whole window, so chrome hover stays
+        // live above it. Copied out so the frame borrow ends before the pages are
+        // borrowed mutably.
+        let pane_rect: Option<Rect> = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.panes.first().map(|p| p.rect));
+        let kind = self.layout.active_kind();
+        let page_of = |want: TabKind| if kind == want { pane_rect } else { None };
+
+        // Outside its own page the pointer belongs to the chrome, and each page is
+        // told so explicitly — otherwise a row stays highlighted after the pointer
+        // has left the page entirely.
+        let at = |page: Option<Rect>| match page {
+            Some(r) if r.contains(x, y) => (x, y),
+            _ => (i32::MIN, i32::MIN),
+        };
 
         let mut changed = false;
+        // Every page with rows, not just settings. The plugins page had no hover at
+        // all because it was never given the pointer.
         if let Some(panel) = self.panel.as_mut() {
-            // Outside the page the pointer belongs to the chrome, and the panel is
-            // told so explicitly — otherwise a row stays highlighted after the
-            // pointer has left the page entirely.
-            let (px, py) = match page {
-                Some(r) if r.contains(x, y) => (x, y),
-                _ => (i32::MIN, i32::MIN),
-            };
+            let (px, py) = at(page_of(TabKind::Settings));
             changed |= panel.ui.set_pointer(px, py);
+        }
+        if let Some(page) = self.plugins_page.as_mut() {
+            let (px, py) = at(page_of(TabKind::Plugins));
+            changed |= page.ui.set_pointer(px, py);
+        }
+        if let Some(help) = self.help.as_mut() {
+            let (px, py) = at(page_of(TabKind::Help));
+            changed |= help.ui.set_pointer(px, py);
         }
 
         let Some(frame) = self.frame.as_ref() else {
@@ -3124,6 +3507,20 @@ impl App {
         // list would scroll the terminal hidden behind it.
         // The sidebar scrolls when the pointer is over it, whatever has focus —
         // scrolling is a pointer gesture, not a keyboard one.
+        if self.plugins_active() {
+            let cell_height = self.cell_size().height as f32;
+            let pixels = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -(y * 3.0 * cell_height),
+                MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+            };
+            if let Some(page) = self.plugins_page.as_mut() {
+                if page.ui.scroll_by(pixels as i32) {
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
+
         if self.help_active() {
             let cell_height = self.cell_size().height as f32;
             let pixels = match delta {
@@ -3551,6 +3948,22 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Wakeup => self.drain_pty_events(),
+            UserEvent::FolderPicked { purpose, path } => {
+                // `None` is a cancelled dialog, which is not an error and should
+                // leave whatever was already typed alone.
+                // `None` is a cancelled dialog, which is not an error.
+                let Some(path) = path else { return };
+                let Some(mut page) = self.plugins_page.take() else {
+                    return;
+                };
+                let changed = page.folder_chosen(purpose, path);
+                self.plugins_page = Some(page);
+
+                if changed {
+                    self.reload_plugin_host();
+                }
+                self.request_redraw();
+            }
         }
     }
 

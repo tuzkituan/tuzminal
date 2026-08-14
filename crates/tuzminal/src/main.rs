@@ -2,13 +2,14 @@
 
 mod app;
 mod appicon;
+mod bundled;
 mod explorer;
 mod gpu;
 mod help;
-mod ide;
 mod keys;
 mod menu;
 mod pkg;
+mod plugins;
 mod proc;
 mod settings;
 mod shells;
@@ -119,6 +120,15 @@ fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     let paths = Paths::discover().context("could not determine configuration directories")?;
+
+    // Written before anything reads the plugin directories, so the bundled plugins are
+    // discovered on the very first launch rather than the second. Existing ones are
+    // never touched.
+    if let Some(dir) = paths.plugin_dirs().first() {
+        if std::fs::create_dir_all(dir).is_ok() {
+            bundled::install_missing(dir);
+        }
+    }
 
     // Subcommand-ish flags all terminate without opening a window.
     if cli.init_config {

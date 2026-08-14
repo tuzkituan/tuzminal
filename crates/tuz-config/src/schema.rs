@@ -85,6 +85,7 @@ pub const DEFAULT_KEYS: &[(&str, &str)] = &[
     ("ctrl+shift+comma", "open_settings"),
     ("ctrl+shift+b", "open_explorer"),
     ("f1", "open_help"),
+    ("ctrl+shift+p", "open_plugins"),
     ("shift+pageup", "scroll_page_up"),
     ("shift+pagedown", "scroll_page_down"),
 ];
@@ -135,6 +136,7 @@ fn default_keys() -> BTreeMap<String, String> {
         ("ctrl+shift+comma", "open_settings"),
         ("ctrl+shift+b", "open_explorer"),
         ("f1", "open_help"),
+        ("ctrl+shift+p", "open_plugins"),
         ("shift+pageup", "scroll_page_up"),
         ("shift+pagedown", "scroll_page_down"),
     ]

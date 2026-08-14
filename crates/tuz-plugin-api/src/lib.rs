@@ -140,6 +140,12 @@ pub enum Event {
     /// The status bar is about to be drawn and wants segments.
     StatusBarRender,
 
+    /// A status segment this plugin published was clicked.
+    ///
+    /// Only segments given an `id` are clickable; the rest are drawn and ignored,
+    /// which keeps a clock from swallowing a press meant for the window behind it.
+    StatusSegmentClick { id: String },
+
     /// A command the plugin registered was invoked.
     Command {
         name: String,
@@ -166,6 +172,13 @@ pub enum KeyOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusSegment {
     pub text: String,
+    /// Identifier sent back in [`Event::StatusSegmentClick`] when this segment is
+    /// pressed. `None` makes the segment inert, which is what a clock wants.
+    ///
+    /// A plugin's own id, not a global one: the host qualifies it with the plugin
+    /// name before dispatch, so two plugins can both use `"open"` without colliding.
+    #[serde(default)]
+    pub id: Option<String>,
     /// `#rrggbb`, or `None` for the theme's default.
     #[serde(default)]
     pub foreground: Option<String>,
@@ -628,6 +641,7 @@ entry = "init.lua"
             },
             Command::SetStatusSegments {
                 segments: vec![StatusSegment {
+                    id: None,
                     text: "seg".to_owned(),
                     foreground: Some("#ff0000".to_owned()),
                     background: None,

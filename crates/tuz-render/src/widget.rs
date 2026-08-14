@@ -275,6 +275,7 @@ pub fn draw_widgets_in(
 ) {
     let focus = ui.focused();
     let hover = ui.hovered();
+    let pressed = ui.pressed();
 
     // Rows outside the viewport are skipped rather than drawn and scissored away.
     // Layout places every row at its natural offset with no clamping, so a directory
@@ -286,11 +287,12 @@ pub fn draw_widgets_in(
     // Backgrounds for every row before any text, so no row's background can paint
     // over the label of the row above it.
     for placed in &rows {
-        draw_row_background(out, placed, focus, hover, theme, colors);
+        draw_row_background(out, placed, focus, hover, pressed, theme, colors);
     }
     for placed in &rows {
         let focused = placed.widget.id().is_some() && placed.widget.id() == focus;
-        draw_row_text(out, fonts, placed, focused, theme, colors);
+        let held = placed.widget.id().is_some() && placed.widget.id() == pressed;
+        draw_row_text(out, fonts, placed, focused, held, theme, colors);
     }
 }
 
@@ -299,17 +301,20 @@ fn intersects(a: Rect, b: Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row_background(
     out: &mut Vec<Instance>,
     placed: &Placed,
     focus: Option<WidgetId>,
     hover: Option<WidgetId>,
+    ui_pressed: Option<WidgetId>,
     theme: &Theme,
     colors: ColorSpace,
 ) {
     let id = placed.widget.id();
     let focused = id.is_some() && id == focus;
     let hovered = id.is_some() && id == hover;
+    let pressed = id.is_some() && id == ui_pressed;
 
     // The selected row of a list, filled before anything else so the ring and the
     // hover highlight both sit on top of it. This is what makes an arrow keypress
@@ -418,7 +423,11 @@ fn draw_row_background(
             inner.y as f32,
             inner.width as f32,
             inner.height as f32,
-            colors.convert_opaque(if hovered {
+            colors.convert_opaque(if pressed {
+                // Inverted, the same signal the toolbar buttons use. Hover alone
+                // cannot show a click: the pointer is already there.
+                theme.cursor()
+            } else if hovered {
                 theme.background_focused()
             } else {
                 theme.background
@@ -439,11 +448,13 @@ fn button_rect(placed: &Placed) -> Rect {
     placed.rect
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row_text(
     out: &mut Vec<Instance>,
     fonts: &mut FontSystem,
     placed: &Placed,
     focused: bool,
+    pressed: bool,
     theme: &Theme,
     colors: ColorSpace,
 ) {
@@ -574,7 +585,11 @@ fn draw_row_text(
                 button_rect(placed),
                 PADDING,
                 Align::Center,
-                if *enabled {
+                if pressed {
+                    // The fill inverted to the accent colour, so the label has to
+                    // invert with it or it disappears into its own button.
+                    theme.background
+                } else if *enabled {
                     theme.foreground
                 } else {
                     // Dimmed rather than hidden: a disabled button should still say
@@ -1382,6 +1397,66 @@ mod tests {
             (title_x - row_x).abs() <= 1.0,
             "title starts at {title_x}, rows at {row_x}"
         );
+    }
+
+    #[test]
+    fn a_pressed_button_inverts_so_a_click_is_visible() {
+        let theme = Theme::builtin_default();
+        let mut fonts = fonts();
+        let mut ui = Ui::new();
+        ui.layout(
+            &[Widget::button(WidgetId(1), "Import")],
+            Rect::new(0, 0, 400, 100),
+            20,
+        );
+
+        let draw = |ui: &Ui, fonts: &mut FontSystem| {
+            let mut out = Vec::new();
+            draw_widgets(&mut out, fonts, ui, &theme, colors());
+            out
+        };
+
+        let idle = draw(&ui, &mut fonts);
+        ui.set_pressed(Some(WidgetId(1)));
+        let held = draw(&ui, &mut fonts);
+
+        let accent = colors().convert_opaque(theme.cursor());
+        // Hover cannot show a click — the pointer is already over the button — so the
+        // pressed look has to differ from every other state.
+        assert!(
+            !idle.iter().any(|i| i.color == accent),
+            "an idle button should not look pressed"
+        );
+        assert!(
+            held.iter().any(|i| i.color == accent),
+            "a held button should invert"
+        );
+    }
+
+    #[test]
+    fn hover_and_press_are_different_looks_for_a_widget_button() {
+        let theme = Theme::builtin_default();
+        let mut fonts = fonts();
+        let mut ui = Ui::new();
+        let area = Rect::new(0, 0, 400, 100);
+        ui.layout(&[Widget::button(WidgetId(1), "Import")], area, 20);
+
+        let rect = ui.placed()[0].rect;
+        ui.set_pointer(rect.x + 2, rect.y + 2);
+        let mut hovered = Vec::new();
+        draw_widgets(&mut hovered, &mut fonts, &ui, &theme, colors());
+
+        ui.set_pressed(Some(WidgetId(1)));
+        let mut held = Vec::new();
+        draw_widgets(&mut held, &mut fonts, &ui, &theme, colors());
+
+        let fill = |out: &[Instance]| {
+            out.iter()
+                .filter(|i| i.flags & crate::FLAG_TEXTURED == 0)
+                .map(|i| i.color)
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(fill(&hovered), fill(&held));
     }
 
 }

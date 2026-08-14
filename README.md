@@ -108,6 +108,11 @@ system decorative.
 
 ## Plugins
 
+**[docs/PLUGINS.md](docs/PLUGINS.md) is the guide**, and
+[`examples/clock`](examples/clock) is a working plugin the test suite loads. Manage
+them from the Plugins page (`ctrl+shift+p`): enable, disable, import a folder, export
+them all.
+
 A plugin is a directory with a `plugin.toml` and an entry file.
 
 ```toml
@@ -178,24 +183,24 @@ the machine draws them.
 **Chrome takes its colors from the theme.** The active tab uses the focused pane
 background so the strip reads as continuous with the terminal below it; the tab
 bar's height comes from the font metrics, not a fixed pixel value, so it scales
-with the text. The bar hides itself with a single tab unless
-`always_show_tab_bar` is set — a permanent strip costs a row of terminal to convey
-nothing.
+with the text. The strip is always shown by default, because it carries the
+toolbar buttons as well as the tabs; `always_show_tab_bar = false` hides it with a
+single tab open, and hides those buttons with it.
 
 ## Workspace
 
 | Crate | Responsibility | Tests |
 |---|---|---|
-| `tuz-config` | TOML schema, themes, live reload, diffing, saving | 71 |
-| `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 78 |
+| `tuz-config` | TOML schema, themes, live reload, diffing, saving | 88 |
+| `tuz-core` | PTY sessions, VT state, color resolution, key encoding | 84 |
 | `tuz-font` | Discovery, system-wide fallback, shaping, glyph atlas | 42 |
 | `tuz-input` | Keychord grammar, actions, keymap | 39 |
-| `tuz-layout` | BSP split tree, tabs, chrome strips, geometric focus | 73 |
-| `tuz-plugin` | Host, Lua runtime, WASM runtime | 57 |
+| `tuz-layout` | BSP split tree, tabs, chrome strips, geometric focus | 88 |
+| `tuz-plugin` | Host, Lua runtime, WASM runtime | 63 |
 | `tuz-plugin-api` | Event/command/manifest contract | 14 |
-| `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 67 |
-| `tuz-ui` | Widget model, focus order, hit-testing, scrolling | 56 |
-| `tuzminal` | Application, GPU surface, CLI, packages, settings panel | 87 |
+| `tuz-render` | Instanced wgpu renderer, text layout, chrome, widgets | 82 |
+| `tuz-ui` | Widget model, focus order, hit-testing, scrolling | 81 |
+| `tuzminal` | Application, GPU surface, CLI, packages, and the settings, plugins, shortcut and file-explorer pages | 149 |
 
 `tuz-core` wraps `alacritty_terminal`, which supplies a battle-tested VT500
 implementation *and* a cross-platform PTY (openpty on unix, ConPTY on Windows)

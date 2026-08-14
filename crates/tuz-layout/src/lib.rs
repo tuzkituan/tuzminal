@@ -131,6 +131,8 @@ pub struct Frame {
 pub enum ChromeButton {
     NewTab,
     NewTabMenu,
+    AppMenu,
+    Plugins,
     Explorer,
     Help,
     Settings,
@@ -164,6 +166,8 @@ impl ChromeButton {
             ChromeButton::Settings => '⚙',
             ChromeButton::Explorer => '▤',
             ChromeButton::Help => '?',
+            ChromeButton::Plugins => '⧉',
+            ChromeButton::AppMenu => '☰',
             ChromeButton::SplitRight => '▥',
             ChromeButton::SplitDown => '▤',
             ChromeButton::Minimize => '—',
@@ -180,6 +184,8 @@ impl ChromeButton {
             ChromeButton::Settings => "Settings",
             ChromeButton::Explorer => "File explorer",
             ChromeButton::Help => "Keyboard shortcuts",
+            ChromeButton::Plugins => "Plugins",
+            ChromeButton::AppMenu => "Menu",
             ChromeButton::SplitRight => "Split right",
             ChromeButton::SplitDown => "Split down",
             ChromeButton::Minimize => "Minimize",
@@ -286,6 +292,7 @@ pub enum TabKind {
     Terminal,
     Settings,
     Help,
+    Plugins,
 }
 
 /// One tab: a pane tree plus which of its panes has focus.

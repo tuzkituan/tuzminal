@@ -24,6 +24,7 @@ pub use chrome::{
 pub use instance::{
     build_pane, ColorSpace, Instance, PaneGeometry, FLAG_COLOR_GLYPH, FLAG_TEXTURED,
 };
+pub use chrome::PADDING as SEGMENT_PADDING;
 pub use text::{draw_in_box, measure, Align};
 pub use widget::{
     center_panel, draw_footer_divider, draw_menu, draw_page_frame, draw_panel_frame, draw_panel_title,

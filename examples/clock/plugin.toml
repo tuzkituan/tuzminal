@@ -1,0 +1,25 @@
+# The smallest plugin that does something visible.
+#
+# Copy this folder into your plugins directory — or open the Plugins page
+# (ctrl+shift+p) and import it by path — then restart, or toggle it there.
+
+name = "clock"
+version = "0.1.0"
+
+# Must match the host's API_VERSION exactly. A mismatch is refused at load rather
+# than allowed to fail mysteriously later.
+api_version = 1
+
+runtime = "lua"
+entry = "init.lua"
+
+description = "Shows the time in the status bar, and ctrl+shift+m to say hello."
+author = "tuzminal"
+
+# Nothing is requested. A plugin that asks for nothing can still do everything in
+# this file: draw status segments, bind keys, and send text to the shell.
+permissions = []
+
+# Empty means "the cheap events" — which includes status_bar_render, startup and
+# command. Expensive ones such as pane_output must always be listed explicitly.
+events = []

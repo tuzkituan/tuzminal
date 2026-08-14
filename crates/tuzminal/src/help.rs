@@ -70,7 +70,10 @@ impl HelpPage {
                     "clear_scrollback",
                 ],
             ),
-            ("Panels", &["open_settings", "open_explorer", "open_help"]),
+            (
+                "Panels",
+                &["open_settings", "open_explorer", "open_plugins", "open_help"],
+            ),
         ];
 
         let keys = config.effective_keys();
@@ -195,6 +198,7 @@ fn describe(action: &str) -> String {
         "open_settings" => "Settings",
         "open_explorer" => "File explorer",
         "open_help" => "This page",
+        "open_plugins" => "Plugins",
         _ => "",
     };
     if known.is_empty() {

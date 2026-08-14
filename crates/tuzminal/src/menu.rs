@@ -11,6 +11,15 @@
 
 use tuz_layout::Rect;
 
+/// What an open menu is for, so the app knows what picking a row means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    /// Values are shell paths.
+    NewTabShell,
+    /// Values name a page to open.
+    AppMenu,
+}
+
 /// One row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuItem {
@@ -20,6 +29,7 @@ pub struct MenuItem {
 }
 
 pub struct Menu {
+    pub kind: MenuKind,
     pub items: Vec<MenuItem>,
     /// The row the keyboard is on, and the one a click lands on when it opens.
     pub selected: usize,
@@ -35,8 +45,9 @@ pub const PADDING: f32 = 8.0;
 const MAX_COLUMNS: u32 = 40;
 
 impl Menu {
-    pub fn new(anchor: Rect, items: Vec<MenuItem>) -> Self {
+    pub fn new(kind: MenuKind, anchor: Rect, items: Vec<MenuItem>) -> Self {
         Self {
+            kind,
             items,
             selected: 0,
             anchor,
@@ -125,6 +136,7 @@ mod tests {
 
     fn menu(anchor: Rect, count: usize) -> Menu {
         Menu::new(
+            MenuKind::AppMenu,
             anchor,
             (0..count)
                 .map(|i| MenuItem {
@@ -202,6 +214,23 @@ mod tests {
         }
         // Outside every row.
         assert_eq!(m.row_at(rect, CELL.1, rect.x - 5, rect.y), None);
+    }
+
+    #[test]
+    fn a_menu_remembers_what_it_is_for() {
+        // One menu type serves the shell picker and the app menu; picking a row means
+        // different things in each, so the kind travels with it rather than being
+        // inferred from the values.
+        let shells = Menu::new(
+            MenuKind::NewTabShell,
+            Rect::new(0, 0, 40, 40),
+            vec![MenuItem {
+                label: "bash".to_owned(),
+                value: "/bin/bash".to_owned(),
+            }],
+        );
+        assert_eq!(shells.kind, MenuKind::NewTabShell);
+        assert_eq!(menu(Rect::new(0, 0, 40, 40), 1).kind, MenuKind::AppMenu);
     }
 
     #[test]

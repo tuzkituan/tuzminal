@@ -485,6 +485,8 @@ pub struct Ui {
     /// The scrolling viewport. Body rows outside it are laid out but not hit-testable,
     /// because they are clipped away when drawn.
     body_area: Rect,
+    /// The widget currently held down, if any.
+    pressed: Option<WidgetId>,
 }
 
 impl Ui {
@@ -648,11 +650,12 @@ impl Ui {
             band.right() - metrics.padding as i32 - total as i32
         };
 
-        // A lone footer widget is a prompt, not a button row: a rename field sized to
-        // the words "Rename to" would leave a handful of characters for the name.
-        // Give it the whole band.
-        let sole = footer.len() == 1;
+        // A lone *prompt* takes the whole band, because a rename field sized to the
+        // words "Rename to" would leave a handful of characters for the name. A lone
+        // *button* does not: a Close button stretched across the window reads as a
+        // banner rather than something to press.
         let stacked = stacks_its_label(footer);
+        let sole = stacked;
 
         let mut x = if sole { band.x + metrics.padding as i32 } else { start };
         let y = band.y + metrics.padding as i32;
@@ -694,6 +697,21 @@ impl Ui {
             });
             x += (width + gap) as i32;
         }
+    }
+
+    /// Mark a widget as held down, for the pressed look.
+    ///
+    /// Separate from focus and hover because it is neither: a press is transient and
+    /// ends on release, and without it a click on a button that is already hovered
+    /// gives no feedback at all — the pointer is by definition already over it.
+    pub fn set_pressed(&mut self, id: Option<WidgetId>) -> bool {
+        let changed = self.pressed != id;
+        self.pressed = id;
+        changed
+    }
+
+    pub fn pressed(&self) -> Option<WidgetId> {
+        self.pressed
     }
 
     /// The scrolling viewport rows are clipped to, plus the pinned footer.

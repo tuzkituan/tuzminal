@@ -162,6 +162,23 @@ pub fn draw(
 
         ChromeButton::Maximize => outline(out, x, y, side, stroke, color),
 
+        // Three bars: the menu mark, and the only icon here that is meant to read as
+        // "more things than fit on a toolbar".
+        ChromeButton::AppMenu => {
+            for i in 0..3 {
+                let gap = (side - stroke) / 2.0;
+                hbar(out, x, y + stroke / 2.0 + i as f32 * gap, side, stroke, color);
+            }
+        }
+
+        // Two overlapping panels: the "extension" mark, and distinct at this size
+        // from the explorer's panel-with-a-column.
+        ChromeButton::Plugins => {
+            let small = side * 0.62;
+            outline(out, x, y + side - small, small, stroke, color);
+            outline(out, x + side - small, y, small, stroke, color);
+        }
+
         // A downward chevron, the same shape a dropdown wears everywhere.
         ChromeButton::NewTabMenu => {
             let arm = side * 0.34;

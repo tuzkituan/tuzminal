@@ -80,12 +80,14 @@ pub struct StatusInput<'a> {
     pub show: &'a StatusBar,
 }
 
-/// Padding either side of a segment's text, matching `chrome::PADDING`.
+/// Padding either side of a segment's text, taken from the renderer rather than
+/// copied.
 ///
-/// Duplicated as a constant rather than shared because the renderer's copy is a
-/// drawing detail; this one exists to predict the width so the drop decision is made
-/// here, where it can be tested, instead of by the renderer's overflow guard.
-const SEGMENT_PADDING: f32 = 8.0;
+/// It was copied, with a comment arguing that the renderer's value was "a drawing
+/// detail". That was wrong twice over: the two must agree for the fit calculation
+/// below to predict anything, and the copy drifted in behaviour as well as risking
+/// drifting in value.
+use tuz_render::SEGMENT_PADDING;
 
 /// Build the built-in segments, longest-lived information first.
 ///
@@ -174,6 +176,8 @@ fn plural(n: usize, word: &str) -> String {
 fn plain(text: String) -> StatusSegment {
     StatusSegment {
         text,
+        // Built-in segments report; they are not buttons.
+        id: None,
         foreground: None,
         background: None,
     }
@@ -193,7 +197,12 @@ fn truncate_to_fit(
     let mut out = Vec::with_capacity(segments.len());
 
     for segment in segments {
-        let width = segment.text.chars().count() as f32 * cell_width + SEGMENT_PADDING * 2.0;
+        // `tuz_render::measure`, not `chars().count()`. The two disagree for every
+        // wide character: a CJK path or an emoji measured by character count comes
+        // out at half its drawn width, so it survives this check and is then cut by
+        // the renderer's overflow guard — the exact outcome this function exists to
+        // prevent.
+        let width = tuz_render::measure(&segment.text, cell_width) + SEGMENT_PADDING * 2.0;
         if used + width > available {
             break;
         }
@@ -318,6 +327,30 @@ mod tests {
         // A real command is different information, so it stays.
         i.title = Some("nvim");
         assert!(texts(&build(&i)).contains(&"nvim"));
+    }
+
+    #[test]
+    fn wide_characters_are_measured_at_their_drawn_width() {
+        // The bug: `chars().count()` says a CJK path is half as wide as it is drawn,
+        // so it survives the fit check and is then cut by the renderer instead.
+        // Eight characters either way; sixteen cells against eight.
+        let ascii = "abcdefgh";
+        let wide = "日本語のディレク";
+        assert_eq!(ascii.chars().count(), wide.chars().count());
+
+        let one = |text: &str| {
+            truncate_to_fit(
+                vec![plain(text.to_owned())],
+                CELL,
+                text.chars().count() as f32 * CELL + SEGMENT_PADDING * 2.0,
+            )
+        };
+
+        assert_eq!(one(ascii).len(), 1, "an ASCII segment fits its own width");
+        assert!(
+            one(wide).is_empty(),
+            "a wide segment needs twice that, so it must not be kept"
+        );
     }
 
     #[test]

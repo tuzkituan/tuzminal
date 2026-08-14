@@ -18,7 +18,11 @@ use tuz_font::{FontSystem, Style};
 use tuz_layout::{ChromeButton, Rect};
 
 /// Inset for text inside a tab or status segment.
-const PADDING: f32 = 8.0;
+///
+/// Public because callers that decide what fits — the status bar builder in
+/// particular — must measure with the same padding this draws with. A private copy
+/// there drifted from this one in behaviour, not just in value.
+pub const PADDING: f32 = 8.0;
 
 /// Thickness of the bar marking the active tab.
 const ACTIVE_MARKER: u32 = 2;
@@ -133,10 +137,14 @@ pub fn draw_tab_bar(
         // is to stay quiet, and it shifted the title sideways as it came and went.
         // Undimming says the same thing using the text already there: an idle tab
         // recedes, one with output does not, and the active tab is bold regardless.
+        // Three readable levels. `bright.black` was the dim one and it is the strip's
+        // own grey — an inactive title written in it was very nearly invisible. The
+        // active tab is still obvious without help from colour: it is bold, sits on
+        // the pane background, and carries the marker bar.
         let foreground = if label.active || label.has_activity {
             theme.foreground
         } else {
-            theme.bright.black
+            theme.normal.white
         };
 
         let mut text_rect = *rect;
@@ -782,7 +790,10 @@ mod tests {
             "activity should not shift the title"
         );
 
-        let dim = colors().convert_opaque(theme.bright.black);
+        // Whatever the dim slot is, not a specific colour: the point is that an
+        // idle tab recedes and a busy one does not, and pinning the exact shade here
+        // made the test fail when the shade was made readable.
+        let dim = colors().convert_opaque(theme.normal.white);
         let lit = colors().convert_opaque(theme.foreground);
         let count = |out: &[Instance], color: [f32; 4]| {
             out.iter()

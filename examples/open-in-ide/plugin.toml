@@ -1,0 +1,20 @@
+# Open the current directory in an editor, from a button in the status bar.
+#
+# This was a built-in feature. It is a plugin now, which is the point: if the
+# plugin API cannot express something this ordinary, it is not an API worth
+# having. Porting it is what added clickable status segments.
+
+name = "open-in-ide"
+version = "0.1.0"
+api_version = 1
+runtime = "lua"
+entry = "init.lua"
+
+description = "Status bar buttons that open the shell's directory in an editor."
+author = "tuzminal"
+
+# `io.open` is how this checks whether an editor is installed. Without this the
+# environment has no `io` table at all and every editor is assumed missing.
+permissions = [{ fs-read = "/usr" }]
+
+events = []

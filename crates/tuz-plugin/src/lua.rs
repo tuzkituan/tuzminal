@@ -192,6 +192,46 @@ impl LuaPlugin {
             Ok(Command::RegisterKeybind { chord, command })
         });
 
+        // The five commands a Lua plugin could not previously emit at all. WASM
+        // plugins serialize `Command` directly, so they always could — the two
+        // runtimes are meant to have the same reach, and this closes the gap.
+
+        push_command!("focus_pane", |args: Variadic<Value>| {
+            let pane = pane_arg(args.first(), "focus_pane")?;
+            Ok(Command::FocusPane { pane })
+        });
+
+        push_command!("close_pane_id", |args: Variadic<Value>| {
+            // Named apart from `close_pane`, which takes no argument and means the
+            // focused one. Overloading on arity would make a typo silently close the
+            // wrong pane.
+            let pane = pane_arg(args.first(), "close_pane_id")?;
+            Ok(Command::ClosePane { pane: Some(pane) })
+        });
+
+        push_command!("send_text_to", |args: Variadic<Value>| {
+            let pane = pane_arg(args.first(), "send_text_to")?;
+            let text = string_arg(args.get(1), "send_text_to")?;
+            Ok(Command::SendText {
+                pane: Some(pane),
+                text,
+            })
+        });
+
+        push_command!("resize", |args: Variadic<Value>| {
+            let direction = direction_from(args.first())?;
+            let delta = args
+                .get(1)
+                .and_then(|v| v.as_f32())
+                .ok_or_else(|| mlua::Error::runtime("resize expects a number"))?;
+            Ok(Command::Resize { direction, delta })
+        });
+
+        push_command!("set_config", |args: Variadic<Value>| {
+            let toml = string_arg(args.first(), "set_config")?;
+            Ok(Command::SetConfigOverlay { toml })
+        });
+
         push_command!("select_tab", |args: Variadic<Value>| {
             let index = args
                 .first()
@@ -210,6 +250,9 @@ impl LuaPlugin {
                 for segment in segments {
                     out.push(StatusSegment {
                         text: segment.get::<String>("text").unwrap_or_default(),
+                        // An `id` makes the segment clickable; without one it is
+                        // drawn and ignored.
+                        id: segment.get::<Option<String>>("id").ok().flatten(),
                         foreground: segment.get::<Option<String>>("foreground").ok().flatten(),
                         background: segment.get::<Option<String>>("background").ok().flatten(),
                     });
@@ -288,6 +331,11 @@ impl PluginRuntime for LuaPlugin {
             Event::Startup => ("on_startup", None),
             Event::ConfigReload => ("on_config_reload", None),
             Event::StatusBarRender => ("on_status_bar_render", None),
+            Event::StatusSegmentClick { id } => {
+                let t = self.table()?;
+                let _ = t.set("id", id.clone());
+                ("on_status_segment_click", Some(t))
+            }
             Event::Bell { pane } => ("on_bell", Some(self.pane_table(*pane)?)),
             Event::PaneOpened { pane } => ("on_pane_opened", Some(self.pane_table(*pane)?)),
             Event::PaneClosed { pane } => ("on_pane_closed", Some(self.pane_table(*pane)?)),
@@ -482,6 +530,23 @@ fn direction_from(value: Option<&Value>) -> Result<Direction, mlua::Error> {
             )))
         }
     })
+}
+
+/// A pane id argument, as a plain integer.
+///
+/// Lua has one number type, so the id arrives as an integer rather than the `pane1`
+/// string form `Display` produces; a negative one is a mistake worth reporting rather
+/// than wrapping into a very large pane that does not exist.
+fn pane_arg(value: Option<&Value>, function: &str) -> Result<PaneId, mlua::Error> {
+    let n = value
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| mlua::Error::runtime(format!("{function} expects a pane id")))?;
+    if n < 0 {
+        return Err(mlua::Error::runtime(format!(
+            "{function} got a negative pane id"
+        )));
+    }
+    Ok(PaneId(n as u32))
 }
 
 fn string_arg(value: Option<&Value>, function: &str) -> Result<String, mlua::Error> {
@@ -756,11 +821,13 @@ return {
             vec![Command::SetStatusSegments {
                 segments: vec![
                     StatusSegment {
+                        id: None,
                         text: "left".to_owned(),
                         foreground: Some("#ff0000".to_owned()),
                         background: None,
                     },
                     StatusSegment {
+                        id: None,
                         text: "right".to_owned(),
                         foreground: None,
                         background: None,
@@ -941,4 +1008,58 @@ return {
             .unwrap();
         assert!(commands.is_empty());
     }
+    /// Every `Command` variant must be reachable from Lua.
+    ///
+    /// Five were not: a Lua plugin could not target a specific pane, resize a split,
+    /// or set a config overlay, while a WASM plugin could — the two runtimes serve
+    /// one API and are supposed to have the same reach.
+    #[test]
+    fn lua_can_emit_every_command_wasm_can() {
+        let source = r#"
+            local M = {}
+            function M.on_startup(ctx)
+              ctx.focus_pane(3)
+              ctx.close_pane_id(4)
+              ctx.send_text_to(5, "hi")
+              ctx.resize("right", 0.25)
+              ctx.set_config("[font]\nsize = 20.0\n")
+            end
+            return M
+        "#;
+        let mut plugin = plugin(source).expect("should load");
+        let commands = plugin.dispatch(&Event::Startup).expect("should run");
+
+        assert!(commands.contains(&Command::FocusPane { pane: PaneId(3) }));
+        assert!(commands.contains(&Command::ClosePane {
+            pane: Some(PaneId(4))
+        }));
+        assert!(commands.contains(&Command::SendText {
+            pane: Some(PaneId(5)),
+            text: "hi".to_owned()
+        }));
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            Command::Resize {
+                direction: Direction::Right,
+                ..
+            }
+        )));
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, Command::SetConfigOverlay { .. })));
+    }
+
+    #[test]
+    fn a_bad_pane_id_is_an_error_rather_than_a_wrapped_number() {
+        // `-1 as u32` is four billion, which would target a pane that does not exist
+        // and fail silently in the app.
+        let source = r#"
+            local M = {}
+            function M.on_startup(ctx) ctx.focus_pane(-1) end
+            return M
+        "#;
+        let mut plugin = plugin(source).expect("should load");
+        assert!(plugin.dispatch(&Event::Startup).is_err());
+    }
+
 }
