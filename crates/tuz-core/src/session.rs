@@ -607,6 +607,42 @@ mod tests {
     }
 
     #[test]
+    fn an_osc_11_query_asks_for_the_background_slot() {
+        // The whole round trip a shell depends on: `OSC 11 ; ?` in, a
+        // `ColorRequest` for the *background* out, and a reply the shell can parse.
+        // The index is 257, not a palette slot — the bug this guards answered with
+        // palette color 1 and told every shell the terminal was dark.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let proxy = EventProxy::new(PaneId(1), tx, Arc::new(|| {}));
+        let mut term = Term::new(TermConfig::default(), &size(80, 24), proxy);
+        let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        parser.advance(&mut term, b"\x1b]11;?\x07");
+
+        let (index, format) = rx
+            .try_iter()
+            .find_map(|e| match e.event {
+                AlacrittyEvent::ColorRequest(i, f) => Some((i, f)),
+                _ => None,
+            })
+            .expect("the query must reach the UI as a ColorRequest");
+
+        let theme = tuz_config::Theme::builtin_default();
+        let color = crate::color::resolve_query(&theme, term.colors(), index)
+            .expect("the background is a slot we know");
+        assert_eq!(color, theme.background);
+
+        let reply = format(alacritty_terminal::vte::ansi::Rgb {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        });
+        assert!(
+            reply.starts_with("\x1b]11;rgb:"),
+            "shells match on the rgb: form, got {reply:?}"
+        );
+    }
+
+    #[test]
     fn term_size_reports_pixel_geometry_to_the_child() {
         // Programs read the pixel fields to size sixel and inline images.
         let ws = size(80, 24).window_size();
